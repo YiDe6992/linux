@@ -203,6 +203,8 @@ void sunxi_drm_rgb_encoder_atomic_enable(struct drm_encoder *encoder,
 #else
 	disp_cfg.displl_clk = false;
 #endif
+	if (rgb->rgb_data->id == 1)
+		disp_cfg.displl_clk = false;
 	sunxi_tcon_mode_init(rgb->sdrm.tcon_dev, &disp_cfg);
 
 	rgb->pclk_clk_rate = rgb->rgb_para.timings.pixel_clk * disp_cfg.tcon_lcd_div;

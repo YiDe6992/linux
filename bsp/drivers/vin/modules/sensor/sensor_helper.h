@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved. */
+
 /*
  * sensor_helper.h: helper function for sensors.
  *
@@ -73,6 +74,7 @@ extern int sensor_set_fmt(struct v4l2_subdev *sd,
 			struct v4l2_subdev_state *state,
 			struct v4l2_subdev_format *fmt);
 extern int sensor_set_ir(struct v4l2_subdev *sd, struct ir_switch *ir_switch);
+extern int sensor_ptn_init(struct v4l2_subdev *sd, struct vin_pattern_config *ptn);
 #else
 extern int sensor_enum_mbus_code(struct v4l2_subdev *sd,
 				struct v4l2_subdev_pad_config *cfg,

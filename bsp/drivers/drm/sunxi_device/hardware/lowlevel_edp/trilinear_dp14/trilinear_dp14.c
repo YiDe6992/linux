@@ -904,8 +904,6 @@ void edp_set_secondary_data_window(struct sunxi_edp_hw_desc *edp_hw, u64 bit_rat
 
 void edp_video_stream_enable(struct sunxi_edp_hw_desc *edp_hw)
 {
-	TR_SET_BITS(edp_hw, TR_SOFT_RESET, 4, 1, 0x1);
-	TR_SET_BITS(edp_hw, TR_SOFT_RESET, 0, 1, 0x1);
 	TR_SET_BITS(edp_hw, TR_VIDEO_STREAM_ENABLE, 0, 1, 0x1);
 	TR_SET_BITS(edp_hw, TR_SECOND_STREAM_ENABLE, 0, 1, 0x1);
 }
@@ -1753,10 +1751,23 @@ u32 trilinear_get_tu_valid_symbol(struct sunxi_edp_hw_desc *edp_hw)
 	return count;
 }
 
+s32 trilinear_link_soft_reset(struct sunxi_edp_hw_desc *edp_hw)
+{
+	TR_SET_BITS(edp_hw, TR_SOFT_RESET, 4, 1, 0x1);
+	msleep(5);
+	return RET_OK;
+}
+
+s32 trilinear_video_soft_reset(struct sunxi_edp_hw_desc *edp_hw)
+{
+	TR_SET_BITS(edp_hw, TR_SOFT_RESET, 0, 1, 0x1);
+	msleep(5);
+	return RET_OK;
+}
+
 s32 trilinear_link_start(struct sunxi_edp_hw_desc *edp_hw)
 {
 	edp_video_stream_enable(edp_hw);
-
 	return RET_OK;
 }
 
@@ -1930,6 +1941,8 @@ static struct sunxi_edp_hw_video_ops trilinear_dp14_video_ops = {
 	.read_edid_block = trilinear_read_edid_block,
 	.irq_enable = trilinear_irq_enable,
 	.irq_disable = trilinear_irq_disable,
+	.link_soft_reset = trilinear_link_soft_reset,
+	.video_soft_reset = trilinear_video_soft_reset,
 	.main_link_start = trilinear_link_start,
 	.main_link_stop = trilinear_link_stop,
 	.lane_remap = trilinear_lane_remap_config,

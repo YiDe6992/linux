@@ -28,6 +28,8 @@
 #define CLK_DSI_HS		2
 #define CLK_LVDS_OR_RGB		3
 
+#define PHY_LEVEL 3
+
 #if IS_ENABLED(CONFIG_ARCH_SUN60IW2)
 #define DCXO "dcxo"
 #else
@@ -35,8 +37,7 @@
 #endif
 struct dsi_combophy_data {
 	unsigned int id;
-	unsigned int lvl;
-	struct combophy_config phy_config[2];
+	struct combophy_config phy_config[PHY_LEVEL];
 };
 struct sunxi_dsi_combophy {
 	uintptr_t reg_base;
@@ -48,6 +49,7 @@ struct sunxi_dsi_combophy {
 	struct reset_control *phy_rst;
 	struct ccu_common               **ccu_clks;
 	struct clk_hw_onecell_data      *hw_clks;
+	struct device *dev;
 
 	struct mutex lock;
 };
@@ -95,7 +97,7 @@ static int sunxi_displl_clk_set_rate(struct clk_hw *hw, unsigned long drate,
 
 	if (nm->vco_enable) {
 		prate_tmp = drate;
-		for (m = 0; prate_tmp < nm->min_rate; ++m)
+		for (m = 1; prate_tmp < nm->min_rate; ++m)
 			prate_tmp = drate * m;
 
 		n = DIV_ROUND_CLOSEST(prate_tmp, prate);
@@ -381,13 +383,66 @@ static int sunxi_dsi_combophy_set_mode(struct phy *phy, enum phy_mode mode, int 
 	return 0;
 }
 
+static int sunxi_dsi_combophy_param_sel(struct sunxi_dsi_combophy *cphy, union phy_configure_opts *opts)
+{
+	int ret, i;
+	struct combophy_config *combophy_cfg;
+
+	combophy_cfg = cphy->dphy_lcd.phy_config;
+
+	if (!opts->mipi_dphy.hs_clk_rate) {
+		DRM_ERROR("[PHY] Unset hs_clk_rate.\n");
+		return -1;
+	}
+
+	for (i = 0; i < PHY_LEVEL; i++) {
+		if ((!combophy_cfg->freq_lvl.lvl_min) || (!combophy_cfg->freq_lvl.lvl_max)) {
+			DRM_WARN("[PHY] phy_config:%d Unset the lvl,Use the default cfg.\n", i);
+			return -1;
+		}
+		ret = clamp(opts->mipi_dphy.hs_clk_rate, combophy_cfg->freq_lvl.lvl_min,
+					combophy_cfg->freq_lvl.lvl_max);
+		if (ret != opts->mipi_dphy.hs_clk_rate) {
+			DRM_WARN("[PHY] hs_clk_rate not matched.\n");
+			combophy_cfg++;
+			continue;
+		} else {
+			cphy->dphy_lcd.phy_config = combophy_cfg;
+			DRM_INFO("[PHY] Matched a suitable combophy configuration.\n");
+			return 0;
+		}
+	}
+
+	DRM_WARN("[PHY] No suitable combophy configuration matched, use the default cfg.\n");
+
+	return 0;
+}
+
 static int sunxi_dsi_combophy_configure(struct phy *phy, union phy_configure_opts *opts)
 {
 	struct phy_configure_opts_mipi_dphy *config = &opts->mipi_dphy;
 	struct sunxi_dsi_combophy *cphy = phy_get_drvdata(phy);
 
 	DRM_INFO("[PHY] %s start\n", __FUNCTION__);
+	sunxi_dsi_combophy_param_sel(cphy, opts);
 	sunxi_dsi_combophy_configure_dsi(&cphy->dphy_lcd, phy->attrs.mode, config);
+
+	return 0;
+}
+
+static int displl_set_spread_spectrum(struct phy *phy, int precent)
+{
+	struct sunxi_dsi_combophy *cphy = phy_get_drvdata(phy);
+	u32 dcxo_rate = 0;
+	struct clk *clk_dcxo = NULL;
+
+	clk_dcxo = devm_clk_get(cphy->dev, "clk_dcxo");
+	if (IS_ERR_OR_NULL(clk_dcxo))
+		dcxo_rate = 24000000;
+	else
+		dcxo_rate = clk_get_rate(clk_dcxo);
+
+	phy_displl_ssc(&cphy->dphy_lcd, precent, dcxo_rate);
 
 	return 0;
 }
@@ -397,6 +452,7 @@ static const struct phy_ops sunxi_dsi_combophy_ops = {
 	.power_off = sunxi_dsi_combophy_power_off,
 	.set_mode = sunxi_dsi_combophy_set_mode,
 	.configure = sunxi_dsi_combophy_configure,
+	.set_speed = displl_set_spread_spectrum,
 };
 static int sunxi_cphy_bind(struct device *dev, struct device *master, void *data)
 {
@@ -487,7 +543,7 @@ static int sunxi_dsi_combophy_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "failed to create PHY\n");
 		return PTR_ERR(cphy->phy);
 	}
-
+	cphy->dev = dev;
 	cphy->id = cphy_data->id;
 	cphy->dphy_lcd.dphy_index = cphy->id;
 	cphy->dphy_lcd.phy_config = (struct combophy_config *)&cphy_data->phy_config[0];
@@ -781,9 +837,13 @@ static const struct dsi_combophy_data sun60iw2_data1 = {
 static const struct dsi_combophy_data sun65iw1_data0 = {
 	.id = 0,
 	.phy_config[0] = {
+		.freq_lvl = {
+			.lvl_min = 80000000,	/* 80Mhz */
+			.lvl_max = 500000000,	/* 500Mhz */
+		},
 		.dphy_tx_time0 = {
 			.bits = {
-				.hs_trail_set = 8,
+				.hs_trail_set = 5,
 				.hs_pre_set = 6,
 				.lpx_tm_set = 0x0e,
 			},
@@ -827,6 +887,60 @@ static const struct dsi_combophy_data sun65iw1_data0 = {
 		},
 	},
 	.phy_config[1] = {
+		.freq_lvl = {
+			.lvl_min = 500000000,	/* 500Mhz */
+			.lvl_max = 1000000000,	/* 1Ghz */
+		},
+		.dphy_tx_time0 = {
+			.bits = {
+				.hs_trail_set = 0x08,
+				.hs_pre_set = 6,
+				.lpx_tm_set = 0x0e,
+			},
+		},
+		.dphy_ana0 = {
+			.bits = {
+				.reg_lptx_setr = 7,
+				.reg_lptx_setc = 7,
+				.reg_preemph3 = 0,
+				.reg_preemph2 = 0,
+				.reg_preemph1 = 0,
+				.reg_preemph0 = 0,
+			},
+		},
+		.dphy_ana4 = {
+			.bits = {
+				.reg_soft_rcal = 0,
+				.reg_vlv_set = 4,
+				.reg_vlptx_set = 3,
+				.reg_vtt_set = 2,
+				.reg_vres_set = 3,
+				.reg_vref_source = 0,
+				.reg_ib = 4,
+				.reg_comtest = 0,
+				.en_comtest = 0,
+				.en_mipi = 1,
+			},
+		},
+		.combo_phy_reg0 = {
+			.bits = {
+				.en_cp = 1,
+				.en_comboldo = 1,
+				.en_lvds = 0,
+				.en_mipi = 1,
+				.en_test_0p8 = 0,
+				.en_test_comboldo = 0,
+			},
+		},
+		.combo_phy_reg1 = {
+			.dwval = 0x53,
+		},
+	},
+	.phy_config[2] = {
+		.freq_lvl = {
+			.lvl_min = 1000000000,	/* 1Ghz */
+			.lvl_max = 1500000000,	/* 1.5Ghz */
+		},
 		.dphy_tx_time0 = {
 			.bits = {
 				.hs_trail_set = 0x0a,

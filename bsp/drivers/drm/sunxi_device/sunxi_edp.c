@@ -1284,6 +1284,8 @@ s32 edp_full_link_train(struct sunxi_edp_hw_desc *edp_hw, struct edp_tx_core *ed
 	if (ret < 0)
 		return ret;
 
+	edp_hw_link_soft_reset(edp_hw);
+
 	ret = edp_link_cr_training(edp_hw, edp_core);
 	if (ret < 0)
 		return ret;
@@ -1347,6 +1349,36 @@ s32 edp_main_link_setup(struct sunxi_edp_hw_desc *edp_hw, struct edp_tx_core *ed
 
 	edp_hw_scrambling_enable(edp_hw, true);
 
+	return ret;
+}
+
+s32 edp_hw_link_soft_reset(struct sunxi_edp_hw_desc *edp_hw)
+{
+	int ret;
+	struct sunxi_edp_hw_video_ops *ops = edp_hw->video_ops;
+
+	if (ops == NULL)
+		return RET_OK;
+
+	if (ops->link_soft_reset) {
+		ret = ops->link_soft_reset(edp_hw);
+	} else
+		ret = RET_OK;
+	return ret;
+}
+
+s32 edp_hw_video_soft_reset(struct sunxi_edp_hw_desc *edp_hw)
+{
+	int ret;
+	struct sunxi_edp_hw_video_ops *ops = edp_hw->video_ops;
+
+	if (ops == NULL)
+		return RET_OK;
+
+	if (ops->video_soft_reset) {
+		ret = ops->video_soft_reset(edp_hw);
+	} else
+		ret = RET_OK;
 	return ret;
 }
 

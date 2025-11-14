@@ -1063,8 +1063,10 @@ struct de_channel_handle *de_channel_create(struct module_create_info *cinfo)
 	if (hdl->private->afbd || hdl->private->tfbd)
 		format_modifiers_num = (hdl->private->afbd ? hdl->private->afbd->format_modifiers_num : 0) +
 				       (hdl->private->tfbd ? hdl->private->tfbd->format_modifiers_num : 0);
-	else
-		format_modifiers_num = ARRAY_SIZE(format_modifiers_common) - 1;
+
+	/* for each channel ,should reserve for DRM_FORMAT_MOD_LINEAR and others */
+	format_modifiers_num += ARRAY_SIZE(format_modifiers_common) - 1;
+
 	hdl->format_modifiers_comb = kmalloc(sizeof(*(hdl->format_modifiers_comb)) *
 					(format_modifiers_num + 1), GFP_KERNEL | __GFP_ZERO);
 	modifier_ptr = hdl->format_modifiers_comb;
@@ -1084,11 +1086,17 @@ struct de_channel_handle *de_channel_create(struct module_create_info *cinfo)
 			       sizeof(*(hdl->format_modifiers_comb)));
 			modifier_ptr += hdl->private->tfbd->format_modifiers_num;
 		}
+
+		/* add default DRM_FORMAT_MOD_LINEAR */
+		memcpy(modifier_ptr, format_modifiers_common,
+		       ARRAY_SIZE(format_modifiers_common) - 1);
+		modifier_ptr += ARRAY_SIZE(format_modifiers_common) - 1;
 	} else {
 		memcpy(modifier_ptr, format_modifiers_common,
 		       format_modifiers_num);
 		modifier_ptr += format_modifiers_num;
 	}
+
 	*modifier_ptr = DRM_FORMAT_MOD_INVALID;
 
 	hdl->is_video = hdl->private->ovl->is_video;

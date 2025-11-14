@@ -35,6 +35,7 @@ struct top_phy_pll_s sun60i_phypll_26m[] = {
 	{ 54000, 0xE80C1A00, 0x00035000, 0x80000000, 0x30000000},
 	{ 65000, 0xE8235A00, 0x00035000, 0x80000000, 0x30000000},
 	{ 74250, 0xE81F5A00, 0x00035000, 0x80000000, 0x30000000},
+	{108000, 0xE80C3500, 0x00035000, 0x00000000, 0x30000000},
 	{148500, 0xE80F5A00, 0x00035000, 0x80000000, 0x30000000},
 	{185625, 0xE80F5A00, 0x00035000, 0x80000000, 0x30000000},
 	{297000, 0xE807B602, 0x00035000, 0x00000000, 0x30000000},
@@ -56,6 +57,7 @@ struct top_phy_pll_s sun60i_phypll_24m[] = {
 };
 
 struct top_phy_s {
+	u32 dcxo_khz;
 	char *rate_name;
 	u32  offset;
 	u32  pll_size;
@@ -164,6 +166,14 @@ void top_phy_pll_set_output(u8 state)
 
 	phy_reg->reg_0020.sun60i.pll_output_gate = state;
 	hdmi_trace("top phy pll output gate: %s\n", state ? "enable" : "disable");
+}
+
+static u32 _top_phy_cal_clk(union REG_0020_t value)
+{
+	u32 clock;
+	clock = top_phy.dcxo_khz * (value.sun60i.pll_n + 1);
+	clock = clock / (value.sun60i.pll_input_div2 + 1);
+	return clock / (value.sun60i.pll_p0 + 1);
 }
 
 int top_phy_config(void)
@@ -318,6 +328,7 @@ static int _top_phy_match_plat(u8 plat_id)
 		for (j = 0; j < ARRAY_SIZE(sunxi_plat[i]->mpll_table); j++) {
 			if (sunxi_plat[i]->mpll_table[j].rate != dcxo_rate)
 				continue;
+			top_phy.dcxo_khz  = sunxi_plat[i]->mpll_table[j].rate / 1000;
 			top_phy.rate_name = sunxi_plat[i]->mpll_table[j].name;
 			top_phy.pll_data  = sunxi_plat[i]->mpll_table[j].mpll;
 			top_phy.pll_size  = sunxi_plat[i]->mpll_table[j].size;
@@ -364,12 +375,13 @@ ssize_t top_phy_dump(char *buf)
 		goto exit;
 	}
 
-	n += sprintf(buf + n, "| name  | ref clk | output | state |\n");
-	n += sprintf(buf + n, "|-------+---------+--------+-------|\n");
-	n += sprintf(buf + n, "| state |  %-5s  |   %-3s  | %-6s|\n",
+	n += sprintf(buf + n, "| name  | ref clk | output | state | cal clock |\n");
+	n += sprintf(buf + n, "|-------+---------+--------+-------|-----------|\n");
+	n += sprintf(buf + n, "| state |  %-5s  |   %-3s  | %-6s| %-6dKHz |\n",
 		top_phy.rate_name,
 		phy_reg->reg_0020.sun60i.pll_output_gate ? "on" : "off",
-		top_phy_pll_get_lock() ? "lock" : "unlock");
+		top_phy_pll_get_lock() ? "lock" : "unlock",
+		_top_phy_cal_clk(phy_reg->reg_0020));
 	n += sprintf(buf + n, " - pll: 0x%08X, 0x%08X, 0x%08X, 0x%08X\n",
 		phy_reg->reg_0020.dwval, phy_reg->reg_0028.dwval,
 		phy_reg->reg_002C.dwval, phy_reg->reg_0030.dwval);

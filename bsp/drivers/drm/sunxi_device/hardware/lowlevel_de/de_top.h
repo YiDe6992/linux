@@ -33,6 +33,7 @@ struct de_top_display_cfg {
 	unsigned long rcq_header_addr;
 	unsigned int rcq_header_byte;
 	unsigned int pixel_mode;
+	unsigned int interlaced;
 };
 
 enum de_rtwb_mode {
@@ -89,6 +90,7 @@ struct de_top_handle *de_top_create(const struct module_create_info *info);
 
 s32 de_top_offline_mode_config(struct de_top_handle *hdl, struct offline_cfg *cfg);
 s32 de_top_get_offline_mode_status(struct de_top_handle *hdl);
+s32 de_top_offline_realloc_pingpang_buf(struct de_top_handle *hdl, unsigned int width, unsigned int height);
 
 s32 de_top_dfs_config_enable(struct de_top_handle *hdl, struct dfs_cfg *cfg);
 

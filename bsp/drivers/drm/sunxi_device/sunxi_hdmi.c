@@ -460,8 +460,13 @@ int sunxi_hdmi_audio_set_info(hdmi_audio_t *info)
 
 int sunxi_hdmi_audio_enable(void)
 {
-	return dw_audio_on();
+	int ret = 0;
+	mutex_lock(&sunxi_hdmi->lock_config);
+	ret = dw_audio_on();
+	mutex_unlock(&sunxi_hdmi->lock_config);
+	return ret;
 }
+
 /*******************************************************************************
  * sunxi hdmi core video info function
  ******************************************************************************/
@@ -872,27 +877,28 @@ int sunxi_hdmi_config(void)
 		return -1;
 	}
 
+	mutex_lock(&sunxi_hdmi->lock_config);
 	dw_avp_set_mute(0x1);
 
 	if (!IS_ERR_OR_NULL(func->phy_disconfig)) {
 		ret = func->phy_disconfig();
 		if (ret != 0) {
 			hdmi_err("sunxi hdmi phy disconfig failed\n");
-			return -1;
+			goto exit;
 		}
 	}
 
 	ret = dw_avp_config();
 	if (ret != 0) {
 		hdmi_err("sunxi hdmi avp config failed\n");
-		return -1;
+		goto exit;
 	}
 
 	if (sunxi_hdmi->plat_data->use_top_phy == 0x1) {
 		ret = top_phy_config();
 		if (ret != 0) {
 			hdmi_err("sunxi hdmi top phy config failed\n");
-			return -1;
+			goto exit;
 		}
 	}
 
@@ -900,15 +906,17 @@ int sunxi_hdmi_config(void)
 		ret = func->phy_config();
 		if (ret != 0) {
 			hdmi_err("sunxi hdmi ext phy config failed\n");
-			return -1;
+			goto exit;
 		}
 	}
 
 	mdelay(50);
 	dw_avp_set_mute(0x0);
 
-	hdmi_trace("sunxi hdmi config done\n");
-	return 0;
+exit:
+	mutex_unlock(&sunxi_hdmi->lock_config);
+	hdmi_trace("%s ret = %d\n", __func__, ret);
+	return ret;
 }
 
 int sunxi_hdmi_smooth_config(void)
@@ -1069,11 +1077,14 @@ int sunxi_hdmi_init(struct sunxi_hdmi_s *hdmi)
 		return -1;
 	}
 
+	mutex_init(&hdmi->lock_config);
+
 	if (!hdmi->smooth_boot) {
 		_sunxi_hdmi_board_init(hdmi);
 		hdmi_trace("sunxi hdmi board init done\n");
 	}
 
+	mutex_lock(&hdmi->lock_config);
 	/* bind phy ops */
 	hdmi->dw_hdmi.phy_ext   = &hdmi->plat_data->phy_func;
 	hdmi->dw_hdmi.dev       = hdmi->dev;
@@ -1086,19 +1097,22 @@ int sunxi_hdmi_init(struct sunxi_hdmi_s *hdmi)
 	ret = dw_hdmi_init(&hdmi->dw_hdmi);
 	if (ret != 0) {
 		hdmi_err("dw dev init failed\n");
-		return -1;
+		goto exit;
 	}
 
 	if (hdmi->plat_data->use_top_phy) {
 		ret = top_phy_init();
 		if (ret != 0) {
 			hdmi_err("top phy init failed\n");
-			return -1;
+			goto exit;
 		}
 	}
 
 	sunxi_hdmi = hdmi;
-	return 0;
+exit:
+	hdmi_trace("%s ret = %d\n", __func__, ret);
+	mutex_unlock(&hdmi->lock_config);
+	return ret;
 }
 
 void sunxi_hdmi_exit(void)

@@ -155,6 +155,9 @@ static void edp_mode_init(struct sunxi_edp_hw_desc *edp_hw, u32 mode)
 		reg_val = SET_BITS(24, 4, reg_val, 0x0);
 	}
 	writel(reg_val, edp_hw->reg_base + REG_EDP_TX_PRESEL);
+	reg_val = readl(edp_hw->reg_base + REG_EDP_AUX_FILTTER);
+	reg_val = SET_BITS(14, 2, reg_val, 0x2);
+	writel(reg_val, edp_hw->reg_base + REG_EDP_AUX_FILTTER);
 }
 
 /*0:edp_mode   1:dp_mode*/
@@ -831,6 +834,7 @@ s32 edp_aux_read(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *buf)
 		writel(1, edp_hw->reg_base + REG_EDP_AUX_START);
 
 		/* wait aux reply event */
+		/*
 		while (!(readl(edp_hw->reg_base + REG_EDP_HPD_EVENT) & (1 << 1))) {
 			if (timeout >= 50000) {
 				EDP_LOW_DBG("edp_aux_read wait AUX_REPLY event timeout, request:0x%x\n",
@@ -840,7 +844,7 @@ s32 edp_aux_read(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *buf)
 			}
 			timeout++;
 		}
-
+		*/
 		/* wait for AUX_REPLY*/
 		//fixme
 		regval = readl(edp_hw->reg_base + REG_EDP_AUX_TIMEOUT);
@@ -953,6 +957,7 @@ s32 edp_aux_write(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *buf
 		writel(1, edp_hw->reg_base + REG_EDP_AUX_START);
 
 		/* wait aux reply event */
+		/*
 		while (!(readl(edp_hw->reg_base + REG_EDP_HPD_EVENT) & (1 << 1))) {
 			if (timeout >= 50000) {
 				EDP_LOW_DBG("edp_aux_write wait AUX_REPLY event timeout, request:0x%x\n",
@@ -962,7 +967,7 @@ s32 edp_aux_write(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *buf
 			}
 			timeout++;
 		}
-
+		*/
 
 		/* wait for AUX_REPLY*/
 		while (((readl(edp_hw->reg_base + REG_EDP_AUX_TIMEOUT) >> 16) & 0x3) != 0) {
@@ -1040,6 +1045,7 @@ s32 edp_aux_i2c_read(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *
 		writel(1, edp_hw->reg_base + REG_EDP_AUX_START);
 
 		/* wait aux reply event */
+		/*
 		while (!(readl(edp_hw->reg_base + REG_EDP_HPD_EVENT) & (1 << 1))) {
 			if (timeout >= 50000) {
 				EDP_LOW_DBG("edp_aux_i2c_read wait AUX_REPLY event timeout, request:0x%x\n", edp_hw->cur_aux_request);
@@ -1048,6 +1054,7 @@ s32 edp_aux_i2c_read(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char *
 			}
 			timeout++;
 		}
+		*/
 
 		/* wait for AUX_REPLY*/
 		while (((readl(edp_hw->reg_base + REG_EDP_AUX_TIMEOUT) >> 16) & 0x3) != 0) {
@@ -1153,6 +1160,7 @@ s32 edp_aux_i2c_write(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char 
 		writel(1, edp_hw->reg_base + REG_EDP_AUX_START);
 
 		/* wait aux reply event */
+		/*
 		while (!(readl(edp_hw->reg_base + REG_EDP_HPD_EVENT) & (1 << 1))) {
 			if (timeout >= 50000) {
 				EDP_LOW_DBG("edp_aux_i2c_write wait AUX_REPLY event timeout, request:0x%x\n", edp_hw->cur_aux_request);
@@ -1161,6 +1169,7 @@ s32 edp_aux_i2c_write(struct sunxi_edp_hw_desc *edp_hw, s32 addr, s32 len, char 
 			}
 			timeout++;
 		}
+		*/
 
 		/* wait for AUX_REPLY*/
 		while (((readl(edp_hw->reg_base + REG_EDP_AUX_TIMEOUT) >> 16) & 0x3) != 0) {
@@ -2330,13 +2339,14 @@ bool inno_check_controller_error(struct sunxi_edp_hw_desc *edp_hw)
 
 	reg_val1 = readl(edp_hw->reg_base + REG_EDP_HPD_PLUG);
 	reg_val1 = GET_BITS(0, 1, reg_val1);
-	EDP_LOW_DBG("reg[0x1a4][bit16:bit23]: original_val:0x%x, cur_value:0x%x\n",
-		    REG_ESD_DEF, reg_val);
-	EDP_LOW_DBG("reg[0x88][bit0]: original_val:0x%x, cur_value:0x%x\n",
-		    REG_HPD_NARROW_PLUSE_DEF, reg_val1);
-	if ((reg_val != REG_ESD_DEF) || (reg_val1 != REG_HPD_NARROW_PLUSE_DEF))
+
+	if ((reg_val != REG_ESD_DEF) || (reg_val1 != REG_HPD_NARROW_PLUSE_DEF)) {
+		EDP_LOW_DBG("reg[0x1a4][bit16:bit23]: original_val:0x%x, cur_value:0x%x\n",
+				REG_ESD_DEF, reg_val);
+		EDP_LOW_DBG("reg[0x88][bit0]: original_val:0x%x, cur_value:0x%x\n",
+				REG_HPD_NARROW_PLUSE_DEF, reg_val1);
 		return true;
-	else
+	} else
 		return false;
 }
 

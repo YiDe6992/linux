@@ -14,34 +14,80 @@
 #include "snd_sunxi_adapter.h"
 #include "snd_sunxi_log.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-struct snd_soc_dai *sunxi_adpt_rtd_cpu_dai(struct snd_soc_pcm_runtime *rtd)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+void sunxi_adpt_set_dai_ops(struct snd_soc_dai_driver *dai_drv, struct snd_soc_dai_ops *ops,
+			    struct sunxi_adapt_dai_ops_priv *priv)
 {
-	return asoc_rtd_to_cpu(rtd, 0);
+	ops->probe = priv->probe;
+	ops->remove = priv->remove;
+	dai_drv->ops = ops;
 }
-
+void sunxi_adpt_rt_delay(struct snd_pcm_runtime *runtime, struct dma_tx_state state)
+{
+	runtime->delay = bytes_to_frames(runtime, (state.in_flight_bytes >> 1));
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+void sunxi_adpt_set_dai_ops(struct snd_soc_dai_driver *dai_drv, struct snd_soc_dai_ops *ops,
+			    struct sunxi_adapt_dai_ops_priv *priv)
+{
+	dai_drv->probe = priv->probe;
+	dai_drv->remove = priv->remove;
+	dai_drv->ops = ops;
+}
 void sunxi_adpt_rt_delay(struct snd_pcm_runtime *runtime, struct dma_tx_state state)
 {
 	runtime->delay = bytes_to_frames(runtime, (state.in_flight_bytes >> 1));
 }
 #else
-struct snd_soc_dai *sunxi_adpt_rtd_cpu_dai(struct snd_soc_pcm_runtime *rtd)
+void sunxi_adpt_set_dai_ops(struct snd_soc_dai_driver *dai_drv, struct snd_soc_dai_ops *ops,
+			    struct sunxi_adapt_dai_ops_priv *priv)
 {
-	return rtd->cpu_dai;
+	dai_drv->probe = priv->probe;
+	dai_drv->remove = priv->remove;
+	dai_drv->ops = ops;
 }
-
 void sunxi_adpt_rt_delay(struct snd_pcm_runtime *runtime, struct dma_tx_state state)
 {
 	return;
 }
 #endif
-EXPORT_SYMBOL_GPL(sunxi_adpt_rtd_cpu_dai);
+EXPORT_SYMBOL_GPL(sunxi_adpt_set_dai_ops);
 EXPORT_SYMBOL_GPL(sunxi_adpt_rt_delay);
+
+/*
+ * ALSA defect(from linux-5.10 to linux-6.6)
+ * unalter active count of components without DAIs will
+ * cause hardware resource to be close by mistake.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE <= KERNEL_VERSION(6, 6, 0)
+void sunxi_adpt_runtime_action(struct snd_soc_component *component, int action)
+{
+	component->active += action;
+}
+#else
+void sunxi_adpt_runtime_action(struct snd_soc_component *component, int action)
+{
+	return;
+}
+#endif
+EXPORT_SYMBOL_GPL(sunxi_adpt_runtime_action);
 
 int snd_sunxi_card_jack_new(struct snd_soc_card *card, const char *id, int type,
 			    struct snd_soc_jack *jack)
 {
 	int ret;
+#if IS_ENABLED(CONFIG_SND_SOC_SUNXI_PULSEAUDIO)
+	struct snd_soc_jack_pin sunxi_jack_pin_switchs[] = {
+		{
+			.pin = "HP",
+			.mask = SND_JACK_HEADPHONE,
+		},
+		{
+			.pin = "HS MIC",
+			.mask = SND_JACK_MICROPHONE,
+		},
+	};
+#endif
 
 	mutex_init(&jack->mutex);
 	jack->card = card;
@@ -59,5 +105,14 @@ int snd_sunxi_card_jack_new(struct snd_soc_card *card, const char *id, int type,
 		SND_LOGDEV_ERR(card->dev, "ASoC: error on %s: %d\n", card->name, ret);
 	}
 
+#if IS_ENABLED(CONFIG_SND_SOC_SUNXI_PULSEAUDIO)
+	ret = snd_soc_jack_add_pins(jack, ARRAY_SIZE(sunxi_jack_pin_switchs), sunxi_jack_pin_switchs);
+	if (ret) {
+		SND_LOG_ERR("snd_soc_jack_add_pins failed\n");
+		return ret;
+	}
+#endif
+
 	return ret;
 }
+EXPORT_SYMBOL_GPL(snd_sunxi_card_jack_new);

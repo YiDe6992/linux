@@ -41,6 +41,7 @@ struct sunxi_tcon {
 	struct sunxi_tcon_lcd tcon_lcd;
 
 	uintptr_t reg_base;
+	struct resource *res;
 	enum tcon_type type;
 
 	/* clock resource */
@@ -259,7 +260,7 @@ static int sunxi_tcon_dsi_mode_init(struct device *tcon_dev)
 			DRM_ERROR("lcd cfg fail!\n");
 			return -1;
 		}
-		tcon_lcd_src_select(&hwtcon->tcon_lcd, LCD_SRC_DE);
+		tcon_lcd_src_select(&hwtcon->tcon_lcd, CONFIG_AW_DRM_BOOT_COLORBAR);
 //		tcon_dsi_open(&hwtcon->tcon_lcd, dsi_para);
 	}
 
@@ -338,7 +339,7 @@ static int sunxi_tcon_lvds_mode_init(struct device *tcon_dev)
 			DRM_ERROR("lcd cfg fail!\n");
 			return -1;
 		}
-		tcon_lcd_src_select(&hwtcon->tcon_lcd, LCD_SRC_DE);
+		tcon_lcd_src_select(&hwtcon->tcon_lcd, CONFIG_AW_DRM_BOOT_COLORBAR);
 	}
 	sunxi_tcon_calc_judge_line(hwtcon, &lvds_para->timings);
 	if (hwtcon->pending_enable_vblank) {
@@ -407,7 +408,7 @@ static int sunxi_tcon_rgb_mode_init(struct device *tcon_dev)
 			DRM_ERROR("lcd-rgb cfg fail!\n");
 			return -1;
 		}
-		tcon_lcd_src_select(&hwtcon->tcon_lcd, LCD_SRC_DE);
+		tcon_lcd_src_select(&hwtcon->tcon_lcd, CONFIG_AW_DRM_BOOT_COLORBAR);
 	}
 	sunxi_tcon_calc_judge_line(hwtcon, &rgb_para->timings);
 	if (hwtcon->pending_enable_vblank) {
@@ -460,8 +461,8 @@ static irqreturn_t sunxi_tcon_irq_event_proc(int irq, void *parg)
 		if (dsi_line > 4 && dsi_line < (timing_t.ver_sync_time - 10)) {
 			sunxi_tcon_updata_vt(&hwtcon->tcon_lcd, &disp_cfg->dsi_para.timings,
 					disp_cfg->dsi_para.vrr_setp);
-			if (disp_cfg->set_dsi_vfp)
-				disp_cfg->set_dsi_vfp(disp_cfg->dev);
+			if (disp_cfg->set_dsi_vbp)
+				disp_cfg->set_dsi_vbp(disp_cfg->dev);
 		} else
 			DRM_WARN("[TCON-VRR] dsi_line:%d, tcon_line:%d\n", dsi_line, tcon_line);
 
@@ -886,6 +887,7 @@ static int sunxi_tcon_parse_dts(struct device *dev)
 	struct resource *res;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	hwtcon->res = res;
 	hwtcon->reg_base = (uintptr_t)devm_ioremap_resource(dev, res);
 
 	if (!hwtcon->reg_base) {
@@ -995,6 +997,12 @@ int sunxi_tcon_of_get_id(struct device *tcon_dev)
 
 	return endpoint.id;
 }
+void sunxi_tcon_vfp_vrr_set(struct device *tcon_dev, struct disp_video_timings *timings)
+{
+	struct sunxi_tcon  *tcon = dev_get_drvdata(tcon_dev);
+
+	sunxi_tcon_updata_vt_2(&tcon->tcon_lcd, timings);
+}
 
 void sunxi_tcon_vrr_set(struct device *tcon_dev, struct disp_output_config *disp_cfg)
 {
@@ -1004,6 +1012,13 @@ void sunxi_tcon_vrr_set(struct device *tcon_dev, struct disp_output_config *disp
 	memcpy(&ctrl->cfg, disp_cfg, sizeof(struct disp_output_config));
 
 	tcon_lcd_vrr_irq(&tcon->tcon_lcd, true);
+}
+
+struct resource *sunxi_tcon_get_res(struct device *tcon_dev)
+{
+	struct sunxi_tcon *tcon = dev_get_drvdata(tcon_dev);
+
+	return tcon->res;
 }
 
 int sunxi_tcon_mode_init(struct device *tcon_dev, struct disp_output_config *disp_cfg)

@@ -211,6 +211,9 @@ s32 tcon_lcd_dsi_clk_enable(u32 sel, u32 en)
  */
 s32 tcon_de_attach(u32 tcon_index, u32 de_index)
 {
+	/* FIXME:: there is no mux in tcon after sun50iw10 */
+	return 0;
+
 	if (de_index == 0) {
 #if defined(CONFIG_ARCH_SUN50IW6)
 		tcon_top[0]->tcon_de_perh.bits.de_port0_perh =
@@ -287,4 +290,3 @@ uintptr_t tcon_top_get_reg_base(u32 sel)
 {
 	return (uintptr_t) tcon_top[sel];
 }
-

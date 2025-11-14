@@ -237,6 +237,8 @@ void sunxi_drm_lvds_encoder_atomic_enable(struct drm_encoder *encoder,
 #else
 	disp_cfg.displl_clk = false;
 #endif
+	if (lvds->lvds_data->id == 1)
+		disp_cfg.displl_clk = false;
 	sunxi_tcon_mode_init(lvds->sdrm.tcon_dev, &disp_cfg);
 
 	lvds->pclk_clk_rate = lvds->lvds_para.timings.pixel_clk * disp_cfg.tcon_lcd_div;

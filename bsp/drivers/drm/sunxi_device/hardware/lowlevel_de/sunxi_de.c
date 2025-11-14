@@ -9,6 +9,7 @@
  * Free Software Foundation;  either version 2 of the  License, or (at your
  * option) any later version.
  */
+#include <linux/version.h>
 #include <linux/of_device.h>
 #include <linux/hrtimer.h>
 #include <linux/dma-mapping.h>
@@ -376,7 +377,7 @@ static int wb_rcq_head_switch(struct sunxi_de_out *hwde)
 	struct sunxi_display_engine *engine = dev_get_drvdata(hwde->dev);
 	struct de_rcq_mem_info *rcq_info = &hwde->rcq_info;
 	struct de_rcq_head *hd = rcq_info->vir_addr;
-	struct de_rcq_head *hd_end = hd + rcq_info->block_num;
+	struct de_rcq_head *hd_end = NULL;
 	unsigned int wb_block_num = engine->wb.wb_hdl->block_num;
 	struct de_reg_block *reg_blk_wb = engine->wb.wb_hdl->block[0];
 	u64 reg_addr = (u64)reg_blk_wb->reg_addr - (u64)engine->reg_base;
@@ -386,6 +387,7 @@ static int wb_rcq_head_switch(struct sunxi_de_out *hwde)
 		return -1;
 	}
 
+	hd_end = hd + rcq_info->block_num;
 	/* find wb block by reg_addr, switch rcq head */
 	for (; hd != hd_end && wb_block_num; hd++) {
 		if (hd->reg_offset == (u32)((uintptr_t)(reg_addr))) {
@@ -438,12 +440,14 @@ static int __maybe_unused de_rtmx_check_rcq_head_dirty(struct sunxi_de_out *hwde
 {
 	struct de_rcq_mem_info *rcq_info = &hwde->rcq_info;
 	struct de_rcq_head *hd = rcq_info->vir_addr;
-	struct de_rcq_head *hd_end = hd + rcq_info->block_num;
+	struct de_rcq_head *hd_end = NULL;
 
 	if (hd == NULL) {
 		DRM_ERROR("rcq head is null\n");
 		return -1;
 	}
+
+	hd_end = hd + rcq_info->block_num;
 
 	for (; hd != hd_end; hd++) {
 		printk("%s header addr 0x%x, len %d , reg offset 0x%x dirty %d hd %lx\n",
@@ -803,6 +807,7 @@ static int rtmx_start(struct sunxi_display_engine *engine, unsigned int id, unsi
 	cfg.pixel_mode = pixel_mode;
 	cfg.w = w;
 	cfg.h = h;
+	cfg.interlaced = hwde->output_info.interlaced;
 	cfg.device_index = hwdev_index;
 	cfg.rcq_header_addr = use_rcq ? (unsigned long)rcq_info->phy_addr : 0;
 	cfg.rcq_header_byte = use_rcq ? rcq_info->block_num_aligned * sizeof(*(rcq_info->vir_addr)) : 0;
@@ -812,7 +817,6 @@ static int rtmx_start(struct sunxi_display_engine *engine, unsigned int id, unsi
 		offline.enable = true;
 	else
 		offline.enable = false;
-	offline.mode = CURRENT_FRAME;
 	offline.mode = ONE_FRAME_DELAY;
 	offline.w = w;
 	offline.h = h;
@@ -1162,6 +1166,7 @@ static int sunxi_display_engine_exit(struct device *dev)
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_PROC_FS)
 #define DE_TOP_PROCFS(name) \
 static const struct proc_ops de_top_##name##_proc_ops = { \
 	.proc_open      = de_top_##name##_proc_open, \
@@ -1229,11 +1234,16 @@ static int de_top_offline_mode_show(struct seq_file *m, void *v)
 
 static int de_top_offline_mode_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, de_top_offline_mode_show, inode->i_private);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 17, 0)
+	return single_open(file, de_top_offline_mode_show, PDE_DATA(inode));
+#else
+	return single_open(file, de_top_offline_mode_show, pde_data(inode));
+#endif
 }
 
 
 DE_TOP_PROCFS(offline_mode)
+#endif
 
 static int sunxi_de_bind(struct device *dev, struct device *master, void *data)
 {
@@ -1313,6 +1323,7 @@ static int sunxi_de_bind(struct device *dev, struct device *master, void *data)
 	wb_info.wb = &engine->wb;
 	engine->wb.drm_wb = sunxi_drm_wb_init_one(&wb_info);
 
+#if IS_ENABLED(CONFIG_PROC_FS)
 	procfs_parent = sunxi_drm_get_procfs_dir();
 	if (procfs_parent != NULL) {
 		if (engine->top_hdl) {
@@ -1322,6 +1333,7 @@ static int sunxi_de_bind(struct device *dev, struct device *master, void *data)
 		}
 
 	}
+#endif
 
 
 	return 0;
@@ -1337,6 +1349,11 @@ static void sunxi_de_unbind(struct device *dev, struct device *master,
 		sunxi_drm_crtc_destory(engine->display_out[i].scrtc);
 	}
 	pm_runtime_disable(dev);
+
+#if IS_ENABLED(CONFIG_PROC_FS)
+	/* remove de_top debug */
+	remove_proc_subtree("sunxi-drm/de_top", NULL);
+#endif
 }
 
 static const struct component_ops sunxi_de_component_ops = {
@@ -1602,8 +1619,12 @@ OUT:
 
 static int sunxi_de_remove(struct platform_device *pdev)
 {
+	struct sunxi_display_engine *engine;
+	engine = dev_get_drvdata(&pdev->dev);
+
 	sunxidrm_debug_term();
 	component_del(&pdev->dev, &sunxi_de_component_ops);
+	sunxi_de_reg_mem_deinit(engine);
 	sunxi_display_engine_exit(&pdev->dev);
 	return 0;
 }

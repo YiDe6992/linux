@@ -1317,6 +1317,20 @@ s32 edp_lane_para_parse(struct device *dev)
 			lane_para->lane_remap[i] = i;
 	}
 
+	ret = of_property_read_u32_array(dev->of_node, "lane_sw", prop_val, prop_len);
+	if (ret == 0) {
+		for (i = 0; i < 4; i++)
+			lane_para->lane_sw[i] = prop_val[i];
+		edp_core->force_level = true;
+	}
+
+	ret = of_property_read_u32_array(dev->of_node, "lane_pre", prop_val, prop_len);
+	if (ret == 0) {
+		for (i = 0; i < 4; i++)
+			lane_para->lane_pre[i] = prop_val[i];
+		edp_core->force_level = true;
+	}
+
 	return RET_OK;
 }
 
@@ -3872,6 +3886,7 @@ void sunxi_edp_encoder_atomic_enable(struct drm_encoder *encoder,
 
 		}
 	} else {
+
 		if (drm_edp->desc->enable_early) {
 			if (drm_edp->desc->enable_early(drm_edp))
 				goto FAIL;
@@ -4203,7 +4218,7 @@ s32 drm_edp_output_enable(struct sunxi_drm_edp *drm_edp)
 
 	ret = edp_main_link_setup(edp_hw, edp_core,
 				  edp_debug->bypass_training ? true : false,
-				  (edp_debug->lane_debug_en && edp_debug->force_level) ? true : false);
+				  ((edp_debug->lane_debug_en && edp_debug->force_level) || edp_core->force_level) ? true : false);
 	if (ret < 0)
 		goto OUT;
 
@@ -4238,6 +4253,8 @@ s32 drm_edp_output_enable(struct sunxi_drm_edp *drm_edp)
 		if (ret < 0)
 			goto OUT;
 	}
+
+	edp_hw_video_soft_reset(edp_hw);
 
 	edp_hw_link_start(edp_hw);
 
@@ -4474,7 +4491,7 @@ s32 drm_dp_output_enable(struct sunxi_drm_edp *drm_edp)
 
 	ret = edp_main_link_setup(edp_hw, edp_core,
 				  edp_debug->bypass_training ? true : false,
-				  (edp_debug->lane_debug_en && edp_debug->force_level) ? true : false);
+				  ((edp_debug->lane_debug_en && edp_debug->force_level) || edp_core->force_level) ? true : false);
 	if (ret < 0)
 		return RET_FAIL;
 
@@ -4833,10 +4850,11 @@ NODE_PUT:
 int sunxi_edp_init_sysfs(struct sunxi_drm_edp *drm_edp)
 {
 	int ret = RET_OK;
-	char edp_class_dev_name[10];
+	char *edp_class_dev_name;
 
 	/*Create and add a character device*/
-	snprintf(edp_class_dev_name, sizeof(edp_class_dev_name), "edp");
+	edp_class_dev_name = kzalloc(32, GFP_KERNEL);
+	snprintf(edp_class_dev_name, 32, "edp");
 	alloc_chrdev_region(&drm_edp->devid, 0, 1, edp_class_dev_name);/*corely for device number*/
 	drm_edp->edp_cdev = cdev_alloc();
 	cdev_init(drm_edp->edp_cdev, &edp_fops);

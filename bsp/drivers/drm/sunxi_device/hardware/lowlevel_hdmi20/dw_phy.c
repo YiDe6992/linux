@@ -492,7 +492,7 @@ ssize_t dw_phy_dump(char *buf)
 	n += sprintf(buf + n, "\n[dw phy]\n");
 	n += sprintf(buf + n, "|  name |  mpll  | power | rxsense | hpd | hpd sense |\n");
 	n += sprintf(buf + n, "|-------+--------+--------+--------+-----+-----------|\n");
-	n += sprintf(buf + n, "| state | %-6s |  %-3s  |  0x%-4x | %-3s |   %-7s |",
+	n += sprintf(buf + n, "| state | %-6s |  %-3s  |  0x%-4x | %-3s |   %-7s |\n",
 		_dw_phy_get_mpll_lock() ? "lock" : "unlock",
 		_dw_phy_get_power_state() ? "on" : "off",
 		_dw_phy_get_rxsense(),

@@ -180,7 +180,10 @@ static int panel_dsi_cmd_seq(struct panel_dsi *dsi_panel,
 	struct mipi_dsi_device *dsi = dsi_panel->dsi;
 	unsigned int i;
 	int err;
-
+#ifdef DSI_RX_DEBUG
+	u32 j;
+	u8 value[100];
+#endif
 	if (!seq)
 		return -EINVAL;
 
@@ -213,6 +216,14 @@ static int panel_dsi_cmd_seq(struct panel_dsi *dsi_panel,
 
 		if (cmd->header.delay)
 			panel_dsi_sleep(cmd->header.delay);
+#ifdef DSI_RX_DEBUG
+		panel_dsi_sleep(500);
+		mipi_dsi_dcs_read(dsi, cmd->payload[0], value, cmd->header.payload_length - 1);
+		printk("%x: ", cmd->payload[0]);
+		for (j = 0; j < cmd->header.payload_length - 1; j++)
+			printk("%x  ", value[j]);
+		printk("\n================\n");
+#endif
 	}
 
 	return 0;
@@ -569,11 +580,13 @@ static int panel_dsi_parse_dt(struct panel_dsi *dsi_panel)
 					dev_err(dsi_panel->dev,
 						"failed to request regulator(%s): %d\n",
 						power_name, ret);
+				kfree(power_name);
 				return ret;
 			}
 
 			dsi_panel->supply[i] = NULL;
 		}
+		kfree(power_name);
 	}
 	power_name = "avdd";
 	dsi_panel->avdd_supply = devm_regulator_get_optional(dsi_panel->panel_dev, power_name);
@@ -620,9 +633,11 @@ static int panel_dsi_parse_dt(struct panel_dsi *dsi_panel)
 			ret = PTR_ERR(dsi_panel->enable_gpio[i]);
 			if (ret != -EBUSY) { /* dual-dsi shares a panel driver, EBUSY will appera */
 				dev_err(dsi_panel->dev, "failed to request %s GPIO: %d\n", gpio_name, ret);
+				kfree(gpio_name);
 				return ret;
 			}
 		}
+		kfree(gpio_name);
 	}
 
 	dsi_panel->reset_gpio =
@@ -636,6 +651,7 @@ static int panel_dsi_parse_dt(struct panel_dsi *dsi_panel)
 	}
 
 	of_property_read_u32(np, "dsc,vrr-setp", &dsi_panel->vrr_setp);
+	of_property_read_u32(np, "pll-ss-permille", &dsi_panel->pll_ss_permille);
 
 	return 0;
 }

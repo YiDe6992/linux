@@ -466,7 +466,7 @@ int sunxi_fbdev_plane_update(struct fbdev_config *config)
 	}
 
 	plane = &fbdev_plane->plane;
-	if ((plane->state->fb || plane->state->crtc) && !config->force) {
+	if ((plane->state->fb || plane->state->crtc) && !config->force && dev->master) {
 		WARN_ON(scrtc_fbdev->fbdev_output);
 		DRM_INFO("skip fbdev plane update because plane used by userspace\n");
 		if (lock)

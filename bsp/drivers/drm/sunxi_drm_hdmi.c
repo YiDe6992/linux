@@ -880,7 +880,7 @@ __sunxi_drv_hdmi_get_dynamic_range_cap(struct sunxi_drm_hdmi *hdmi)
 	hdmi->hdmi_ctrl.drv_dynamic_range_cap = dr_cap;
 
 	if (!(dr & dr_cap))
-		hdmi_wrn("hdmi drv check old dynamic range %d unsupport!", dr);
+		hdmi_trace("hdmi drv check old dynamic range %d unsupport!", dr);
 
 	return 0;
 }
@@ -900,7 +900,7 @@ static int __sunxi_drv_hdmi_set_pxfmt(struct sunxi_drm_hdmi *hdmi, uint64_t val)
 	u32 map_bit = ffs(val) - 1;
 
 	if (!(val & hdmi->hdmi_ctrl.drv_pixel_format_cap)) {
-		hdmi_inf("hdmi drv check set color mode: %s unsupport.\n",
+		hdmi_trace("hdmi drv check set color mode: %s unsupport.\n",
 		_shdmi_color_mode_string[map_bit]);
 		return -1;
 	}
@@ -908,7 +908,7 @@ static int __sunxi_drv_hdmi_set_pxfmt(struct sunxi_drm_hdmi *hdmi, uint64_t val)
 	info->format = (enum disp_csc_type)_shdmi_unblend_color_format(map_bit);
 	info->bits   = (enum disp_data_bits)_shdmi_unblend_color_depth(map_bit);
 
-	hdmi_inf("hdmi drv set color mode: %s\n", _shdmi_color_mode_string[map_bit]);
+	hdmi_trace("hdmi drv set color mode: %s\n", _shdmi_color_mode_string[map_bit]);
 	return 0;
 }
 
@@ -1033,7 +1033,7 @@ static int _sunxi_drv_hdmi_disp_info_check(struct sunxi_drm_hdmi *hdmi)
 		flush_flag = true;
 
 	if (flush_flag) {
-		hdmi_inf("hdmi drv check use flush when old[%d] - new[%d]\n",
+		hdmi_trace("hdmi drv check use flush when old[%d] - new[%d]\n",
 				old_state, new_state);
 		hdmi->hdmi_ctrl.drv_need_flush = 0x1;
 		goto need_flush;
@@ -2652,8 +2652,14 @@ use_default:
 static enum drm_mode_status _sunxi_drm_hdmi_mode_valid(
 		struct drm_connector *connector, struct drm_display_mode *mode)
 {
-
 	int rate = drm_mode_vrefresh(mode);
+
+	/* check low i-timing */
+	if ((mode->flags & DRM_MODE_FLAG_INTERLACE) && (mode->vdisplay < 1080)) {
+		hdmi_trace("drm hdmi unsupport mode %dx%di@%dHz\n",
+				mode->hdisplay, mode->vdisplay, rate);
+		return MODE_BAD;
+	}
 
 	/* check frame rate support */
 	if (rate > 60) {
@@ -2772,7 +2778,7 @@ static int _sunxi_drm_hdmi_set_property(
 		goto set_done;
 	}
 
-	hdmi_err("drm hdmi unsupport set property: %s\n", property->name);
+	hdmi_trace("drm hdmi unsupport set property: %s\n", property->name);
 	return -1;
 set_done:
 	hdmi_trace("drm hdmi set property %s: 0x%x %s\n",

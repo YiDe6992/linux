@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved. */
+
 /*
  * configs for cameras.
  *
@@ -39,6 +40,7 @@ typedef enum tag_CAMERA_IO_CMD {
 	GET_COMBO_LANE_MAP,
 	GET_COMBO_WDR_CFG,
 	SET_SENSOR_STANDBY,
+	SET_PTN,
 	SENSOR_TVIN_INIT,
 	GET_SENSOR_CH_OUTPUT_FMT,
 } __camera_cmd_t;

@@ -21,6 +21,8 @@
 #include <linux/phy/phy.h>
 #include <linux/phy/phy-mipi-dphy.h>
 #include <linux/version.h>
+#include <linux/proc_fs.h>
+#include <linux/delay.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc_helper.h>
@@ -30,16 +32,19 @@
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_property.h>
+#include <drm/drm_print.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #include <drm/display/drm_dsc_helper.h>
 #else
 #include <drm/drm_dsc.h>
 #endif
+#include "sunxi-sid.h"
 #include "sunxi_drm_drv.h"
 #include "sunxi_device/sunxi_tcon.h"
 #include "sunxi_drm_intf.h"
 #include "sunxi_drm_crtc.h"
 #include "panel/panels.h"
+#include "sunxi_drm_debug.h"
 #include <video/sunxi_drm_notify.h>
 #define PHY_SINGLE_ENABLE 1
 #define PHY_DUAL_ENABLE 2
@@ -59,6 +64,22 @@ void sunxi_disp_notify_call_chain(int cmd, int flag);
 struct dsi_data {
 	int id;
 };
+
+struct esd_sw_wd {
+	struct timer_list timer;
+	struct work_struct feed_work;
+	struct work_struct recovery_work;
+	atomic_t esd_count;
+	unsigned long timeout;
+	struct sunxi_drm_dsi *dsi;
+	atomic_t fed;
+};
+
+struct panel_data {
+	u8 value[256];
+	u32 len;
+	u8 reg;
+};
 struct sunxi_drm_dsi {
 	struct sunxi_drm_device sdrm;
 	struct mipi_dsi_host host;
@@ -74,6 +95,7 @@ struct sunxi_drm_dsi {
 	union phy_configure_opts phy_opts;
 	struct sunxi_dsi_lcd dsi_lcd;
 	uintptr_t reg_base;
+	struct resource *res;
 	uintptr_t dsc_base;
 	const struct dsi_data *dsi_data;
 	struct drm_dsc_config *dsc;
@@ -82,6 +104,7 @@ struct sunxi_drm_dsi {
 	void *irq_data;
 	u32 irq_no;
 	dev_t devid;
+	struct panel_data panel_reg;
 
 	struct clk *displl_ls;
 	struct clk *displl_hs;
@@ -93,6 +116,14 @@ struct sunxi_drm_dsi {
 	struct reset_control *rst_bus;
 	unsigned long hs_clk_rate;
 	unsigned long ls_clk_rate;
+	bool displl_clk;
+	unsigned int pll_ss_permille;
+
+	struct esd_sw_wd *esd_wdt;
+	struct gpio_desc *te_gpio;
+	int te_irq;
+	struct workqueue_struct *panel_wq;
+	struct work_struct panel_work;
 };
 static const struct dsi_data dsi0_data = {
 	.id = 0,
@@ -109,6 +140,154 @@ static const struct of_device_id sunxi_drm_dsi_match[] = {
 };
 
 static void sunxi_dsi_enable_vblank(bool enable, void *data);
+static ssize_t sunxi_drm_dsi_transfer(struct sunxi_drm_dsi *dsi,
+				const struct mipi_dsi_msg *msg);
+
+static void __maybe_unused esd_watchdog_start(struct esd_sw_wd *esd_wdt)
+{
+	mod_timer(&esd_wdt->timer, jiffies + esd_wdt->timeout);
+}
+
+static void __maybe_unused esd_watchdog_stop(struct esd_sw_wd *esd_wdt)
+{
+	del_timer_sync(&esd_wdt->timer);
+}
+
+static irqreturn_t te_irq_handler(int irq, void *data)
+{
+	struct sunxi_drm_dsi *dsi = data;
+
+	schedule_work(&dsi->esd_wdt->feed_work);
+	return IRQ_HANDLED;
+}
+
+static int panel_dsi_register_te_irq(struct sunxi_drm_dsi *dsi)
+{
+	int ret = -1;
+	unsigned int te_irq;
+
+	dsi->te_gpio =
+		devm_gpiod_get_optional(dsi->dev, "te", GPIOD_IN);
+	if (IS_ERR(dsi->te_gpio)) {
+		ret = PTR_ERR(dsi->te_gpio);
+		DRM_ERROR("%s:%d failed to request %s GPIO: %d\n", __FUNCTION__, __LINE__, "te", ret);
+		return ret;
+	} else if (!dsi->te_gpio) {
+		DRM_WARN("TE GPIO not configured\n");
+		return ret;
+	} else {
+		DRM_INFO("TE GPIO successfully requested\n");
+	}
+
+	if (dsi->te_gpio) {
+		te_irq = gpiod_to_irq(dsi->te_gpio);
+
+		irq_set_status_flags(te_irq, IRQ_DISABLE_UNLAZY);
+
+		ret = devm_request_irq(dsi->dev, te_irq, te_irq_handler,
+								IRQF_ONESHOT | IRQF_TRIGGER_FALLING,
+								"TE_GPIO", dsi);
+		if (ret) {
+			dev_err(dsi->dev, "Failed to request TE IRQ\n");
+			irq_clear_status_flags(te_irq, IRQ_DISABLE_UNLAZY);
+			return ret;
+		}
+
+		DRM_INFO("te_irq has been register. %s:%d\n", __FUNCTION__, __LINE__);
+	}
+
+	return ret;
+}
+
+static void esd_feed_watchdog(struct work_struct *work)
+{
+	struct esd_sw_wd *esd_wdt = container_of(work, struct esd_sw_wd, feed_work);
+
+	atomic_set(&esd_wdt->fed, 1);
+	esd_watchdog_start(esd_wdt);
+}
+
+static void display_recovery_work(struct work_struct *work)
+{
+	struct sunxi_drm_device *sdrm;
+	struct drm_crtc *crtc;
+	struct drm_connector *connector;
+	struct drm_crtc_state *crtc_state;
+	struct sunxi_crtc_state *scrtc_state;
+	struct esd_sw_wd *esd_wdt = container_of(work, struct esd_sw_wd, recovery_work);
+
+	sdrm = &esd_wdt->dsi->sdrm;
+	crtc = sdrm->encoder.crtc;
+	crtc_state = crtc->state;
+	connector = &sdrm->connector;
+	scrtc_state = to_sunxi_crtc_state(crtc_state);
+
+	atomic_inc(&esd_wdt->esd_count);
+	DRM_WARN("%s:%d esd_count:%d\n", __FUNCTION__, __LINE__, atomic_read(&esd_wdt->esd_count));
+
+	if (!atomic_read(&esd_wdt->fed)) {
+		drm_mode_config_helper_suspend(sdrm->drm_dev);
+		mdelay(10);
+		drm_mode_config_helper_resume(sdrm->drm_dev);
+		// drm_kms_helper_hotplug_event(sdrm->drm_dev);
+	}
+}
+
+static void esd_watchdog_timeout(struct timer_list *t)
+{
+	struct esd_sw_wd *esd_wdt = from_timer(esd_wdt, t, timer);
+
+	atomic_set(&esd_wdt->fed, 0);
+	schedule_work(&esd_wdt->recovery_work);
+}
+
+static int esd_watchdog_init(struct sunxi_drm_dsi *dsi)
+{
+	int ret;
+
+	DRM_INFO("Loading esd watchdog module...\n");
+	ret = panel_dsi_register_te_irq(dsi);
+	if (ret) {
+		DRM_ERROR("Failed to request TE IRQ\n");
+		return ret;
+	}
+
+	dsi->esd_wdt = devm_kzalloc(dsi->dev, sizeof(struct esd_sw_wd), GFP_KERNEL);
+	if (!dsi->esd_wdt) {
+		DRM_ERROR("Failed to allocate memory for watchdog\n");
+		return -1;
+	}
+
+	dsi->esd_wdt->timeout = HZ;
+	atomic_set(&dsi->esd_wdt->fed, 1);
+	atomic_set(&dsi->esd_wdt->esd_count, 0);
+	INIT_WORK(&dsi->esd_wdt->feed_work, esd_feed_watchdog);
+	INIT_WORK(&dsi->esd_wdt->recovery_work, display_recovery_work);
+
+	timer_setup(&dsi->esd_wdt->timer, esd_watchdog_timeout, 0);
+
+	dsi->esd_wdt->dsi = dsi;
+
+	return 0;
+}
+
+static int __maybe_unused esd_watchdog_exit(struct sunxi_drm_dsi *dsi)
+{
+	struct esd_sw_wd *esd_wdt;
+
+	DRM_INFO("Unloading esd watchdog module...\n");
+	esd_wdt = dsi->esd_wdt;
+	disable_irq(dsi->te_irq);
+	synchronize_irq(dsi->te_irq);
+
+	// TODO:Maybe need to add much more exit code.
+	cancel_work_sync(&esd_wdt->recovery_work);
+	cancel_work_sync(&esd_wdt->feed_work);
+
+	esd_watchdog_stop(esd_wdt);
+
+	return 0;
+}
 
 static struct device *drm_dsi_of_get_tcon(struct device *dsi_dev)
 {
@@ -278,16 +457,54 @@ static int sunxi_dsi_clk_config_disable(struct sunxi_drm_dsi *dsi)
 	return ret;
 }
 
+void sunxi_dsi_panel_check(struct work_struct *work)
+{
+	struct sunxi_drm_dsi *dsi = container_of(work, struct sunxi_drm_dsi, panel_work);
+	u8 cmd = dsi->panel_reg.reg;
+
+	struct mipi_dsi_msg msg = {
+		.channel = dsi->dsi_para.channel,
+		.type = 0x06,
+		.tx_buf = &cmd,
+		.tx_len = 1,
+		.rx_buf = dsi->panel_reg.value,
+		.rx_len = dsi->panel_reg.len,
+	};
+	if (!msg.rx_len)
+		return;
+	dsi_read_mode_en(&dsi->dsi_lcd, 1);
+	sunxi_drm_dsi_transfer(dsi, &msg);
+	dsi_read_mode_en(&dsi->dsi_lcd, 0);
+}
+
 static irqreturn_t sunxi_dsi_irq_event_proc(int irq, void *parg)
 {
 	struct sunxi_drm_dsi *dsi = parg;
 	struct disp_video_timings *timings = &dsi->dsi_para.timings;
+	struct disp_video_timings timing_t;
+	u32 dsi_line = 0;
+	static u32 a;
 
 	if (dsi_irq_query(&dsi->dsi_lcd, DSI_IRQ_VIDEO_LINE)) {
-		sunxi_dsi_vrr_irq(&dsi->dsi_lcd, timings, false);
+		if (sunxi_get_soc_ver() == 0)
+			sunxi_dsi_vrr_irq(&dsi->dsi_lcd, timings, false);
+		else {
+			dsi_line = dsi_get_real_cur_line(&dsi->dsi_lcd);
+			dsi_get_timing(&dsi->dsi_lcd, &timing_t);
+			if (dsi_line >= 1 && dsi_line < (timing_t.ver_sync_time - 5)) {
+				sunxi_tcon_vfp_vrr_set(dsi->sdrm.tcon_dev, timings);
+				sunxi_dsi_updata_vt_2(&dsi->dsi_lcd, timings);
+				DRM_INFO("[DSI-VRR] dsi_line:%d okkkk\n", dsi_line);
+			} else
+				DRM_WARN("[DSI-VRR] dsi_line:%d errrr\n", dsi_line);
+		}
 
 		return IRQ_HANDLED;
 	}
+	dsi_line = dsi_get_cur_line(&dsi->dsi_lcd);
+	if (!(a % 120) && dsi_line < (timings->ver_sync_time + timings->ver_back_porch))
+		queue_work(dsi->panel_wq, &dsi->panel_work);
+	a++;
 	dsi_irq_query(&dsi->dsi_lcd, DSI_IRQ_VIDEO_VBLK);
 
 	return dsi->irq_handler(irq, dsi->irq_data);
@@ -353,9 +570,9 @@ static int sunxi_dsi_enable_output(struct sunxi_drm_dsi *dsi)
 	struct disp_dsi_para *dsi_para = &dsi->dsi_para;
 
 	sunxi_tcon_dsi_enable_output(dsi->sdrm.tcon_dev);
-	dsi_open(&dsi->dsi_lcd, dsi_para);
+	dsi_open_hs_mode(&dsi->dsi_lcd, dsi_para);
 	if (dsi->slave)
-		dsi_open(&dsi->slave->dsi_lcd, dsi_para);
+		dsi_open_hs_mode(&dsi->slave->dsi_lcd, dsi_para);
 
 	return 0;
 }
@@ -425,7 +642,7 @@ static void dsi_timing_setup(struct sunxi_drm_dsi *dsi, struct disp_video_timing
 		DRM_ERROR("One or more PPS parameters exceeded their allowed bit depth.");
 }
 
-static int sunxi_drm_dsi_set_vfp(struct device *dev)
+static int sunxi_drm_dsi_set_vbp(struct device *dev)
 {
 	struct sunxi_drm_dsi *dsi = dev_get_drvdata(dev);
 	struct disp_video_timings *timings = &dsi->dsi_para.timings;
@@ -485,16 +702,19 @@ void sunxi_drm_dsi_encoder_atomic_enable(struct drm_encoder *encoder,
 	disp_cfg.displl_clk = false;
 	disp_cfg.tcon_lcd_div = lcd_div;
 #endif
+	dsi->displl_clk = disp_cfg.displl_clk;
 	if (dsi->slave || (dsi->dsi_para.mode_flags & MIPI_DSI_SLAVE_MODE))
 		disp_cfg.slave_dsi = true;
 
-	disp_cfg.set_dsi_vfp = sunxi_drm_dsi_set_vfp;
+	disp_cfg.set_dsi_vbp = sunxi_drm_dsi_set_vbp;
 	disp_cfg.get_dsi_line = sunxi_drm_dsi_get_line;
 	if (dsi->enable) {
-		disp_cfg.set_dsi_vfp = sunxi_drm_dsi_set_vfp;
-		if (disp_cfg.slave_dsi)
-			sunxi_tcon_vrr_set(dsi->sdrm.tcon_dev, &disp_cfg);
-		else
+		if (disp_cfg.slave_dsi) {
+			if (sunxi_get_soc_ver() == 0)
+				sunxi_tcon_vrr_set(dsi->sdrm.tcon_dev, &disp_cfg);
+			else
+				sunxi_dsi_vfp_vrr_irq(&dsi->dsi_lcd, &dsi->dsi_para.timings);
+		} else
 			sunxi_dsi_vrr_irq(&dsi->dsi_lcd, &dsi->dsi_para.timings, true);
 		DRM_DEBUG_KMS("[DSI-VRR] set mode: " DRM_MODE_FMT "\n", DRM_MODE_ARG(&dsi->mode));
 		return;
@@ -510,7 +730,7 @@ void sunxi_drm_dsi_encoder_atomic_enable(struct drm_encoder *encoder,
 	sunxi_tcon_mode_init(dsi->sdrm.tcon_dev, &disp_cfg);
 
 	/* dual dsi use tcon's irq, single dsi use its own irq */
-	if (!disp_cfg.slave_dsi) {
+	if (!disp_cfg.slave_dsi || (sunxi_get_soc_ver() != 0 && dsi->dsc)) {
 		dsi->irq_handler = sunxi_crtc_event_proc;
 		dsi->irq_data = scrtc_state->base.crtc;
 		ret = devm_request_irq(dsi->dev, dsi->irq_no, sunxi_dsi_irq_event_proc,
@@ -520,6 +740,8 @@ void sunxi_drm_dsi_encoder_atomic_enable(struct drm_encoder *encoder,
 		}
 	}
 
+	if (dsi->dsi_para.mode_flags & MIPI_DSI_MODE_VIDEO_BURST)
+		dsi->dsi_para.timings.pixel_clk = dsi->dsi_para.timings.pixel_clk * 10 / 9;
 	dsi->ls_clk_rate = dsi->dsi_para.timings.pixel_clk;
 	dsi->hs_clk_rate = dsi->dsi_para.timings.pixel_clk * lcd_div;
 	ret = sunxi_dsi_clk_config_enable(dsi);
@@ -580,10 +802,8 @@ void sunxi_drm_dsi_encoder_atomic_enable(struct drm_encoder *encoder,
 		drm_panel_prepare(dsi->sdrm.panel);
 
 		sunxi_dsi_displl_enable(dsi);
-
-		dsi_clk_enable(&dsi->dsi_lcd, &dsi->dsi_para, 1);
-		if (dsi->slave)
-			dsi_clk_enable(&dsi->slave->dsi_lcd, &dsi->dsi_para, 1);
+		if (dsi->pll_ss_permille)
+			phy_set_speed(dsi->phy, dsi->pll_ss_permille);
 
 		ret = sunxi_dsi_enable_output(dsi);
 		if (ret < 0)
@@ -602,6 +822,8 @@ void sunxi_drm_dsi_encoder_atomic_enable(struct drm_encoder *encoder,
 		dsi->pending_enable_vblank = false;
 	}
 	drm_panel_enable(dsi->sdrm.panel);
+	if (dsi->te_gpio)
+		esd_watchdog_start(dsi->esd_wdt);
 	DRM_INFO("[DSI] %s finish\n", __FUNCTION__);
 }
 
@@ -632,12 +854,13 @@ void sunxi_drm_dsi_encoder_atomic_disable(struct drm_encoder *encoder,
 		sunxi_disp_notify_call_chain(SUNXI_PANEL_EVENT_BLANK,
 				dsi->dsi_para.mode_flags & MIPI_DSI_SYNC_INCELL);
 #endif
+	if (dsi->te_gpio)
+		esd_watchdog_stop(dsi->esd_wdt);
 	drm_panel_disable(dsi->sdrm.panel);
-
-	sunxi_dsi_displl_disable(dsi);
 
 	drm_panel_unprepare(dsi->sdrm.panel);
 
+	sunxi_dsi_displl_disable(dsi);
 	if (dsi->phy) {
 		phy_power_off(dsi->phy);
 	}
@@ -656,7 +879,8 @@ void sunxi_drm_dsi_encoder_atomic_disable(struct drm_encoder *encoder,
 	sunxi_dsi_disable_output(dsi);
 	sunxi_tcon_mode_exit(dsi->sdrm.tcon_dev);
 
-	if (!(dsi->slave || (dsi->dsi_para.mode_flags & MIPI_DSI_SLAVE_MODE)))
+	if (!(dsi->slave || (dsi->dsi_para.mode_flags & MIPI_DSI_SLAVE_MODE)) ||
+			(sunxi_get_soc_ver() != 0 && dsi->dsc))
 		devm_free_irq(dsi->dev, dsi->irq_no, dsi);
 
 	dsi->enable = false;
@@ -732,9 +956,6 @@ int sunxi_drm_dsi_encoder_atomic_check(struct drm_encoder *encoder,
 	struct sunxi_crtc_state *scrtc_state = to_sunxi_crtc_state(crtc_state);
 	struct sunxi_drm_dsi *dsi = encoder_to_sunxi_drm_dsi(encoder);
 
-	/* FIXME:TODO: color_fmt/clolor_depth update by actual configuration */
-//	scrtc_state->color_fmt = DISP_CSC_TYPE_RGB;
-//	scrtc_state->color_depth = DISP_DATA_8BITS;
 	scrtc_state->tcon_id = dsi->sdrm.tcon_id;
 	scrtc_state->enable_vblank = sunxi_dsi_enable_vblank;
 	scrtc_state->check_status = sunxi_dsi_fifo_check;
@@ -825,6 +1046,233 @@ static const struct drm_connector_helper_funcs
 	.get_modes = sunxi_dsi_connector_get_modes,
 };
 
+#if IS_ENABLED(CONFIG_PROC_FS)
+static ssize_t panel_reg_read(struct file *file, char __user *user_buf, size_t count, loff_t *ppos)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	struct sunxi_drm_dsi *dsi = pde_data(file_inode(file));
+#else
+	struct sunxi_drm_dsi *dsi = PDE_DATA(file_inode(file));
+#endif
+	char buf[256] = "";
+	size_t len = 0, i;
+
+	if (!dsi || *ppos > 0)
+		return 0;
+
+	for (i = 0; i < dsi->panel_reg.len; i++) {
+	//	printk("***** 0x%x ******\n", dsi->panel_reg.value[i]);
+		len += snprintf(buf + len, 256 - len, "%x ", dsi->panel_reg.value[i]);
+		if (len >= 256) {
+			len = 256 - 1;
+			break;
+		}
+	}
+
+	buf[len] = '\n';
+	len += 1;
+
+	if (copy_to_user(user_buf, buf, len))
+		return -EFAULT;
+
+	*ppos += len;
+
+	return len;
+}
+
+static ssize_t panel_reg_write(struct file *file, const char __user *user_buf, size_t count, loff_t *ppos)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	struct sunxi_drm_dsi *dsi = pde_data(file_inode(file));
+#else
+	struct sunxi_drm_dsi *dsi = PDE_DATA(file_inode(file));
+#endif
+	char buf[32];
+	unsigned long value1, value2;
+	int ret;
+
+	if (!dsi || count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+	ret = sscanf(buf, "%lx %lx", &value1, &value2);
+	if (ret != 2)
+		return -EINVAL;
+
+	dsi->panel_reg.reg = (u8)value1;
+	dsi->panel_reg.len = (u32)value2;
+
+	return count;
+}
+
+static const struct proc_ops panel_reg_fops = {
+	.proc_read = panel_reg_read,
+	.proc_write = panel_reg_write,
+};
+
+static ssize_t tcon_colorbar_show(struct file *file, const char __user *user_buf, size_t count, loff_t *ppos)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	struct sunxi_drm_dsi *dsi = pde_data(file_inode(file));
+#else
+	struct sunxi_drm_dsi *dsi = PDE_DATA(file_inode(file));
+#endif
+	char buf[32];
+	unsigned long value;
+	int ret;
+
+	if (!dsi || count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	buf[count] = '\0';
+	ret = sscanf(buf, "%lx", &value);
+	if (ret != 1)
+		return -EINVAL;
+
+	sunxi_tcon_show_pattern(dsi->sdrm.tcon_dev, value);
+
+	return count;
+}
+
+static const struct proc_ops colorbar_fops = {
+	.proc_read = NULL,
+	.proc_write = tcon_colorbar_show,
+};
+
+static ssize_t esd_show(struct file *file, char __user *user_buf, size_t count, loff_t *ppos)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	struct sunxi_drm_dsi *dsi = pde_data(file_inode(file));
+#else
+	struct sunxi_drm_dsi *dsi = PDE_DATA(file_inode(file));
+#endif
+	struct esd_sw_wd *esd_wdt = dsi->esd_wdt;
+	char buf[64] = "";
+	size_t len = 0;
+
+	if (!dsi || *ppos > 0)
+		return 0;
+
+	len += snprintf(buf, sizeof(buf), "esd_count:%d fed:%s\n", atomic_read(&esd_wdt->esd_count),
+					atomic_read(&esd_wdt->fed) ? "TRUE" : "FALSE");
+
+	if (copy_to_user(user_buf, buf, len))
+		return -EFAULT;
+
+	*ppos += len;
+
+	return len;
+}
+
+static const struct proc_ops esd_fops = {
+	.proc_read = esd_show,
+	.proc_write = NULL,
+};
+
+static void print_physical_memory(struct drm_printer p, struct resource *res, size_t offset, size_t size)
+{
+	uintptr_t phys_addr = res->start;
+	void __iomem *base;
+	size_t i, j;
+
+	base = ioremap(phys_addr + offset, size);
+
+	for (i = 0; i < size; i += 16) {
+		size_t line_size = min(size - i, (size_t)16);
+
+		drm_printf(&p, "%08lx: ", (unsigned long)(phys_addr + i + offset));
+		for (j = 0; j < line_size; j += 4)
+			drm_printf(&p, "%08x ", readl(base + i + j));
+		drm_printf(&p, "\n");
+	}
+	iounmap(base);
+}
+
+static int sunxi_drm_dsi_debug_show(struct seq_file *m, void *data)
+{
+	struct sunxi_drm_dsi *dsi = (struct sunxi_drm_dsi *)m->private;
+	struct disp_video_timings timings;
+	struct drm_printer p = drm_seq_file_printer(m);
+	struct resource *res = NULL;
+	unsigned long pclk = 0;
+	u32 value;
+
+	dsi_get_timing(&dsi->dsi_lcd, &timings);
+
+	drm_printf(&p, "\t interface type: %s\n",
+			dsi->slave ? "dual-dsi" : "single-dsi");
+	drm_printf(&p, "\t dsi_mode: %s, \t 3dfifo: %s\n",
+			dsi->dsi_para.mode_flags & MIPI_DSI_SLAVE_MODE ? "slave-dsi" : "master-dsi",
+			dsi->dsi_para.mode_flags & MIPI_DSI_EN_3DFIFO ? "enabled" : "disabled");
+
+	value = readl(ioremap(dsi->res->start + 0x10e0, 4));
+	drm_printf(&p, "\t clk and data lane work mode:\n");
+	drm_printf(&p, "\t\t  data0 | data1 | data2 | data3 | clk \n");
+	drm_printf(&p, "\t\t -------+-------+-------+-------+------\n");
+	drm_printf(&p, "\t\t   %2s   |  %2s   |  %2s   |  %2s   |  %2s   \n",
+			(value & 0x7) == 5 ? "HS" : "LP",
+			(value >> 4 & 0x7) == 5 ? "HS" : "LP",
+			(value >> 8 & 0x7)  == 5 ? "HS" : "LP",
+			(value >> 12 & 0x7) == 5 ? "HS" : "LP",
+			(value >> 16 & 0x7) == 5 ? "HS" : "LP");
+	drm_printf(&p, "\t clk source: %s\n", dsi->displl_clk ? "displl" : "ccmu");
+	pclk = clk_get_rate(dsi->displl_ls);
+	if (dsi->displl_clk) {
+		pclk = clk_get_rate(dsi->displl_ls);
+		drm_printf(&p, "\t\t pixel_clk rate to be set:%luKHz, real pixel_clk rate:%luKHz\n",
+				dsi->ls_clk_rate / 1000, pclk / 1000);
+	}
+	drm_printf(&p, "\t  hsync-len | hback-porch |  hactive  | hfront-porch | vsync-len | vback-porch | vactive | vfront-porch \n");
+	drm_printf(&p, "\t -----------+-------------+-----------+--------------+-----------+-------------+---------+--------------\n");
+	drm_printf(&p, "\t     %3d    |    %4d     |   %4d    |     %4d     |    %3d    |    %4d     |   %4d  |     %4d\n",
+			timings.hor_sync_time, timings.hor_back_porch, timings.x_res, timings.hor_front_porch,
+			timings.ver_sync_time, timings.ver_back_porch, timings.y_res, timings.ver_front_porch);
+
+	res = sunxi_tcon_get_res(dsi->sdrm.tcon_dev);
+	drm_printf(&p, "\n******* tcon reg dump ********\n");
+	if (res) {
+		print_physical_memory(p, res, 0, 0x17c);
+		print_physical_memory(p, res, 0x220, 0x30);
+	}
+
+	drm_printf(&p, "\n******* dsi reg dump ********\n");
+	print_physical_memory(p, dsi->res, 0, 0x14c);
+	print_physical_memory(p, dsi->res, 0x1f0, 0x10c);
+	print_physical_memory(p, dsi->res, 0x1000, 0x13c);
+
+
+	return 0;
+}
+
+static int sunxi_drm_dsi_procfs_init(struct sunxi_drm_dsi *dsi)
+{
+	static struct proc_dir_entry *lcd_dir;
+	static struct proc_dir_entry *dir;
+	char name[10];
+	dir = proc_mkdir("lcd", NULL);
+
+	if (IS_ERR_OR_NULL(dir)) {
+		pr_err("Couldn't create lcd procfs directory !\n");
+		return -ENOMEM;
+	}
+	snprintf(name, sizeof(name), "dsi%d", dsi->dsi_data->id);
+	lcd_dir = proc_mkdir(name, dir);
+	proc_create_data("panel_reg", 0664, lcd_dir, &panel_reg_fops, dsi);
+	proc_create_data("colorbar", 0224, lcd_dir, &colorbar_fops, dsi);
+	proc_create_single_data("status", 444, lcd_dir,
+				sunxi_drm_dsi_debug_show, dsi);
+	proc_create_data("esd", 0444, lcd_dir, &esd_fops, dsi);
+
+	return 0;
+}
+#endif
+
 static int sunxi_drm_dsi_bind(struct device *dev, struct device *master, void *data)
 {
 	struct sunxi_drm_dsi *dsi = dev_get_drvdata(dev);
@@ -845,6 +1293,11 @@ static int sunxi_drm_dsi_bind(struct device *dev, struct device *master, void *d
 	}
 	if (dsi->master)
 		return 0;
+	dsi->panel_wq = alloc_workqueue("dsi_wq", WQ_UNBOUND, 0);
+	if (!dsi->panel_wq)
+		DRM_ERROR("Failed to allocate workqueue\n");
+	else
+		INIT_WORK(&dsi->panel_work, sunxi_dsi_panel_check);
 
 	tcon_lcd_dev = drm_dsi_of_get_tcon(dsi->dev);
 	if (tcon_lcd_dev == NULL) {
@@ -890,6 +1343,9 @@ static int sunxi_drm_dsi_bind(struct device *dev, struct device *master, void *d
 	drm_connector_attach_encoder(&sdrm->connector, &sdrm->encoder);
 //	tcon_dev->cfg.private_data = dsi;
 
+#if IS_ENABLED(CONFIG_PROC_FS)
+	ret = sunxi_drm_dsi_procfs_init(dsi);
+#endif
 	dsi->bound = true;
 
 	return 0;
@@ -935,6 +1391,7 @@ static int sunxi_drm_dsi_host_attach(struct mipi_dsi_host *host,
 	dsi->dsi_para.hs_rate = device->hs_rate;
 	dsi->dsi_para.lp_rate = device->lp_rate;
 	dsi->dsi_para.vrr_setp = dsi_panel->vrr_setp;
+	dsi->pll_ss_permille = dsi_panel->pll_ss_permille;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	if (device->dsc)
 		dsi->dsc = device->dsc;
@@ -969,52 +1426,12 @@ static int sunxi_drm_dsi_host_detach(struct mipi_dsi_host *host,
 	return 0;
 }
 
-static s32 sunxi_dsi_read_para(struct sunxi_drm_dsi *dsi, const struct mipi_dsi_msg *msg)
-{
-	s32 ret;
-
-	ret = dsi_dcs_rd(&dsi->dsi_lcd, msg->rx_buf, msg->rx_len);
-
-	return ret;
-}
-
-static s32 sunxi_dsi_write_para(struct sunxi_drm_dsi *dsi, struct mipi_dsi_packet *packet)
-{
-	u32 ecc, crc, para_num;
-	u8 *para = NULL;
-
-	para = kmalloc(packet->size + 2, GFP_ATOMIC);
-	if (!para) {
-	//	printk("%s %s %s :kmalloc fail\n", __FILE__, __func__, __LINE__);
-		return -1;
-	}
-	ecc = packet->header[0] | (packet->header[1] << 8) | (packet->header[2] << 16);
-	para[0] = packet->header[0];
-	para[1] = packet->header[1];
-	para[2] = packet->header[2];
-	para[3] = dsi_ecc_pro(ecc);
-	para_num = 4;
-
-	if (packet->payload_length) {
-		memcpy(para + 4, packet->payload, packet->payload_length);
-		crc = dsi_crc_pro((u8 *)packet->payload, packet->payload_length + 1);
-		para[packet->size] = (crc >> 0) & 0xff;
-		para[packet->size + 1] = (crc >> 8) & 0xff;
-		para_num = packet->size + 2;
-	}
-	dsi_dcs_wr(&dsi->dsi_lcd, para, para_num);
-
-	kfree(para);
-	para = NULL;
-
-	return 0;
-}
-
-static ssize_t sunxi_drm_dsi_transfer(struct sunxi_drm_dsi *dsi,
-				const struct mipi_dsi_msg *msg)
+static s32 sunxi_dsi_write_para(struct sunxi_drm_dsi *dsi, const struct mipi_dsi_msg *msg)
 {
 	struct mipi_dsi_packet packet;
-	int ret;
+	u32 ecc, crc, para_num;
+	u8 *para = NULL;
+	int ret = 0;
 
 	/* create a packet to the DSI protocol */
 	ret = mipi_dsi_create_packet(&packet, msg);
@@ -1022,12 +1439,80 @@ static ssize_t sunxi_drm_dsi_transfer(struct sunxi_drm_dsi *dsi,
 		DRM_ERROR("failed to create packet\n");
 		return ret;
 	}
-	sunxi_dsi_write_para(dsi, &packet);
-	if (msg->rx_len) {
-		ret = sunxi_dsi_read_para(dsi, msg);
-		if (ret < 0)
-			return ret;
+
+	para = kmalloc(packet.size + 2, GFP_ATOMIC);
+	if (!para) {
+	//	printk("%s %s %s :kmalloc fail\n", __FILE__, __func__, __LINE__);
+		return -1;
 	}
+	ecc = packet.header[0] | (packet.header[1] << 8) | (packet.header[2] << 16);
+	para[0] = packet.header[0];
+	para[1] = packet.header[1];
+	para[2] = packet.header[2];
+	para[3] = dsi_ecc_pro(ecc);
+	para_num = 4;
+
+	if (packet.payload_length) {
+		memcpy(para + 4, packet.payload, packet.payload_length);
+		crc = dsi_crc_pro((u8 *)packet.payload, packet.payload_length + 1);
+		para[packet.size] = (crc >> 0) & 0xff;
+		para[packet.size + 1] = (crc >> 8) & 0xff;
+		para_num = packet.size + 2;
+	}
+	dsi_dcs_wr(&dsi->dsi_lcd, para, para_num);
+
+	return 0;
+}
+
+static s32 sunxi_dsi_read_para(struct sunxi_drm_dsi *dsi, const struct mipi_dsi_msg *msg)
+{
+	s32 ret;
+	struct mipi_dsi_msg max_pkt_size_msg;
+	int i;
+	u32 rx_cntr = msg->rx_len, rx_curr;
+	u8 tx[2] = { 22 & 0xff, 22 >> 8 };
+	u8 rx_bf[64], *rx_buf = msg->rx_buf;
+
+	max_pkt_size_msg.channel = msg->channel;
+	max_pkt_size_msg.type = 0x37;
+	max_pkt_size_msg.tx_len = sizeof(tx);
+	max_pkt_size_msg.tx_buf = tx;
+	sunxi_dsi_write_para(dsi, &max_pkt_size_msg);
+
+	while (rx_cntr) {
+		if (rx_cntr >= 22)
+			rx_curr = 22;
+		else {
+			rx_curr = rx_cntr;
+			tx[0] = rx_curr & 0xff;
+			tx[1] = rx_curr >> 8;
+			max_pkt_size_msg.tx_buf = tx;
+			sunxi_dsi_write_para(dsi, &max_pkt_size_msg);
+		}
+		rx_cntr -= rx_curr;
+		sunxi_dsi_write_para(dsi, msg);
+		ret = dsi_dcs_rd(&dsi->dsi_lcd, rx_bf, rx_curr);
+		for (i = 0; i < rx_curr; i++) {
+			*rx_buf = 0x00;
+			*rx_buf |= *(rx_bf + i);
+			rx_buf++;
+		}
+	}
+
+	return ret;
+}
+
+static ssize_t sunxi_drm_dsi_transfer(struct sunxi_drm_dsi *dsi,
+				const struct mipi_dsi_msg *msg)
+{
+	int ret = 0;
+	bool is_read = (msg->rx_buf && msg->rx_len);
+
+	if (is_read) {
+		ret = sunxi_dsi_read_para(dsi, msg);
+		return ret;
+	} else
+		sunxi_dsi_write_para(dsi, msg);
 
 	if (dsi->slave)
 		sunxi_drm_dsi_transfer(dsi->slave, msg);
@@ -1070,6 +1555,7 @@ static int sunxi_drm_dsi_probe(struct platform_device *pdev)
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	dsi->res = res;
 	dsi->reg_base = (uintptr_t)devm_ioremap_resource(dev, res);
 	if (!dsi->reg_base) {
 		DRM_ERROR("unable to map dsi registers\n");
@@ -1142,6 +1628,11 @@ static int sunxi_drm_dsi_probe(struct platform_device *pdev)
 	dsi_set_reg_base(&dsi->dsi_lcd, dsi->reg_base);
 	dev_set_drvdata(dev, dsi);
 	platform_set_drvdata(pdev, dsi);
+
+	ret = esd_watchdog_init(dsi);
+	// TODO:Maybe need to release resource.
+	// if (ret < 0)
+	// 	esd_watchdog_exit(dsi);
 
 	ret = mipi_dsi_host_register(&dsi->host);
 	if (ret) {

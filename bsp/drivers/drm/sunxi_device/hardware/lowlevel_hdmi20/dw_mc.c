@@ -8,6 +8,7 @@
  * License version 2.  This program is licensed "as is" without any
  * warranty of any kind, whether express or implied.
  ******************************************************************************/
+#include <linux/delay.h>
 #include "dw_dev.h"
 #include "dw_mc.h"
 
@@ -141,18 +142,17 @@ void dw_mc_clk_all_enable(void)
 	struct dw_hdmi_dev_s *hdmi = dw_get_hdmi();
 
 	hdmi_trace("dw hdmi mc enable all clock\n");
+
+	dw_mc_set_clk(DW_MC_CLK_AUDIO, hdmi->audio_on ? DW_HDMI_ENABLE : DW_HDMI_DISABLE);
+	/* make sure audio clock enable */
+	mdelay(20);
+
 	_dw_mc_set_csc_bypass(DW_HDMI_ENABLE);
 	dw_mc_set_clk(DW_MC_CLK_PIXEL, DW_HDMI_ENABLE);
 	dw_mc_set_clk(DW_MC_CLK_TMDS,  DW_HDMI_ENABLE);
-	if (hdmi->pixel_repeat)
-		dw_mc_set_clk(DW_MC_CLK_PREP, DW_HDMI_ENABLE);
-	else
-		dw_mc_set_clk(DW_MC_CLK_PREP, DW_HDMI_DISABLE);
+	dw_mc_set_clk(DW_MC_CLK_PREP, hdmi->pixel_repeat ? DW_HDMI_ENABLE : DW_HDMI_DISABLE);
+	dw_mc_set_clk(DW_MC_CLK_PREP, DW_HDMI_ENABLE);
 	dw_mc_set_clk(DW_MC_CLK_CSC, DW_HDMI_ENABLE);
-	if (hdmi->audio_on)
-		dw_mc_set_clk(DW_MC_CLK_AUDIO, DW_HDMI_ENABLE);
-	else
-		dw_mc_set_clk(DW_MC_CLK_AUDIO, DW_HDMI_DISABLE);
 	dw_mc_set_clk(DW_MC_CLK_HDCP, DW_HDMI_DISABLE);
 }
 

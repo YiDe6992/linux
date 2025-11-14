@@ -72,7 +72,10 @@ struct vin_ptn_cfg {
 	__u32 ptn_h;
 	__u32 ptn_mode;
 	__u32 ptn_dw;
+	__u32 ptn_gen_dly;
 	__u32 ptn_type;
+	__u32 ptn_size;
+	__u32 ptn_cnt;
 	struct vin_mm ptn_buf;
 };
 
@@ -115,6 +118,10 @@ struct vin_core {
 	unsigned int sensor_sel;
 	unsigned int csi_sel;
 	unsigned int mipi_sel;
+	unsigned int csi_ch;
+	/* bit0~bit3: which channel the parser is connected to the isp;
+	bit4: whether to enable the mipi vc funvtion, 1: enable 0:disable;
+	bit5: whenther to enable the replication function of the parser;*/
 	unsigned int isp_sel;
 	unsigned int tdm_rx_sel;
 	unsigned int vipp_sel;
@@ -151,6 +158,7 @@ struct vin_core {
 #endif
 #if IS_ENABLED(CONFIG_RV_RUN_CAR_REVERSE)
 	struct rpmsg_vinc rpmsg;
+	const char *rproc_ser_name;
 #endif
 
 };
@@ -174,5 +182,4 @@ void sunxi_vin_core_unregister_driver(void);
 struct vin_core *sunxi_vin_core_get_dev(int index);
 struct vin_fmt *vin_find_format(const u32 *pixelformat, const u32 *mbus_code,
 				  unsigned int mask, int index, bool have_code);
-
 #endif /* _VIN_CORE_H_ */

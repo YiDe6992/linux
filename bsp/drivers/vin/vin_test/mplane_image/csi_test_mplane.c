@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved. */
 /*
  *
@@ -55,11 +55,12 @@
 #define ALIGN_4K(x) (((x) + (4095)) & ~(4095))
 #define ALIGN_16B(x) (((x) + (15)) & ~(15))
 
-//#define DEBUG
 #define display_frame 0
 #define video_s_ctrl 0
 #define SET_PHY2VIR 0
+#define USE_LARGE_MODE 0
 #define	BK_INT_POOL 0
+#define PATTERN_MODE 0
 
 #ifdef DEBUG
 #define ASSERT(f)	assert(f)
@@ -633,6 +634,7 @@ static int req_frame_buffers(void)
 		free(buffers);
 		buffers = NULL;
 	}
+
 	buffers = calloc(req.count, sizeof(*buffers));
 
 	for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
@@ -957,6 +959,15 @@ static int camera_init(int sel, int mode)
 	}
 #endif
 
+#if USE_LARGE_MODE
+	char dma_merge_mode;
+	dma_merge_mode = 1;
+	if (-1 == ioctl(fd, VIDIOC_SET_DMA_MERGE, &dma_merge_mode)) {
+		printf("VIDIOC_SET_DMA_MERGE!\n");
+		return -1;
+	}
+#endif
+
 	inp.index = sel;
 	if (-1 == ioctl(fd, VIDIOC_S_INPUT, &inp)) {
 		printf("VIDIOC_S_INPUT %d error!\n", sel);
@@ -1185,6 +1196,31 @@ static int video_get_control(int cmd)
 	return control.value;
 }
 
+#if PATTERN_MODE
+static void *read_bin_file(char *path, int *length)
+{
+	FILE *pfile;
+	void *buf;
+	int i;
+
+	pfile = fopen(path, "rb");
+	if (pfile == NULL) {
+		printf("open %s fail\n", path);
+		return NULL;
+	}
+	printf("open %s ok\n", path);
+	fseek(pfile, 0, SEEK_END);
+	*length = ftell(pfile);
+	buf = (void *)malloc((*length + 1) * sizeof(char));
+	rewind(pfile);
+	*length = fread(buf, 1, *length, pfile);
+	printf("%s size = %d, buf_addr 0x%x\n", path, *length, buf);
+	fclose(pfile);
+
+	return buf;
+}
+#endif
+
 static int main_test(int sel, int mode)
 {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -1197,6 +1233,28 @@ static int main_test(int sel, int mode)
 
 	if (-1 == camera_init(sel, mode))
 		return -1;
+
+#if PATTERN_MODE
+	int buf_len;
+	void *ptn_vaddr = NULL;
+	struct vin_pattern_config ptn_cfg;
+
+	ptn_vaddr = read_bin_file("./1080p_raw10_20.bin", &buf_len);
+	memset(&ptn_cfg, 0, sizeof(ptn_cfg));
+	ptn_cfg.ptn_en = 1;
+	ptn_cfg.ptn_addr = ptn_vaddr;
+	ptn_cfg.ptn_size = buf_len;
+	ptn_cfg.ptn_w = input_size.width;
+	ptn_cfg.ptn_h = input_size.height;
+	ptn_cfg.ptn_fmt = V4L2_PIX_FMT_SBGGR10;
+	ptn_cfg.ptn_type = 1;
+	if (-1 == ioctl(fd, VIDIOC_VIN_PTN_CFG, &ptn_cfg)) {
+		printf("VIDIOC_VIN_PTN_CFG failed\n");
+	}
+	if (ptn_vaddr)
+		free(ptn_vaddr);
+#endif
+
 	if (-1 == camera_fmt_set(mode))
 		return -1;
 	if (-1 == req_frame_buffers())
@@ -1234,6 +1292,7 @@ static int main_test(int sel, int mode)
 	}
 	printf("video_wait_thread wait to exit\n");
 #endif
+
 
 	pixformat = TVD_PL_YUV420;
 	ret = disp_init(input_size.width, input_size.height, pixformat);
@@ -1460,8 +1519,6 @@ int main(int argc, char *argv[])
 		mode = atoi(argv[6]);
 		test_cnt = atoi(argv[7]);
 		fps = atoi(argv[8]);
-		/* osd test use */
-		/* osd_mode = atoi(argv[8]); */
 	} else if (argc == 10) {
 		dev_id = atoi(argv[1]);
 		sprintf(dev_name, "/dev/video%d", dev_id);

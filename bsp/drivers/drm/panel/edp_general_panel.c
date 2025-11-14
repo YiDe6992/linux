@@ -40,6 +40,7 @@ struct general_panel {
 	struct gpio_desc *reset_gpio;
 	enum drm_panel_orientation orientation;
 	unsigned int power_delay_ms;
+	unsigned int disable_delay_ms;
 };
 
 bool general_panel_edp_is_support_backlight(struct drm_panel *panel)
@@ -94,6 +95,7 @@ static int general_panel_unprepare(struct drm_panel *panel)
 			msleep(10);
 		}
 	}
+	general_panel_sleep(edp_panel->disable_delay_ms);
 
 	return 0;
 }
@@ -112,7 +114,6 @@ static int general_panel_prepare(struct drm_panel *panel)
 					i, err);
 				return err;
 			}
-			general_panel_sleep(edp_panel->power_delay_ms);
 		}
 	}
 
@@ -120,6 +121,7 @@ static int general_panel_prepare(struct drm_panel *panel)
 		if (edp_panel->enable_gpio[i])
 			gpiod_set_value_cansleep(edp_panel->enable_gpio[i], 1);
 	}
+	general_panel_sleep(edp_panel->power_delay_ms);
 
 	return 0;
 }
@@ -239,6 +241,9 @@ static int general_panel_probe(struct platform_device *pdev)
 
 	if (of_property_read_u32(edp_panel->dev->of_node, "power-delay-ms", &edp_panel->power_delay_ms) < 0)
 		edp_panel->power_delay_ms = 10;
+
+	if (of_property_read_u32(edp_panel->dev->of_node, "disable-delay-ms", &edp_panel->disable_delay_ms) < 0)
+		edp_panel->disable_delay_ms = 10;
 
 	/* Get GPIOs and backlight controller. */
 	for (i = 0; i < GPIO_MAX; i++) {

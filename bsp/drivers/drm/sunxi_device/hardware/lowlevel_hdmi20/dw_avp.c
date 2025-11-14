@@ -302,7 +302,7 @@ static int _dw_audio_param_reset(struct dw_audio_s *audio)
 
 	audio->mInterfaceType = DW_AUDIO_INTERFACE_I2S;
 	audio->mCodingType = DW_AUD_CODING_PCM;
-	audio->mSamplingFrequency = 44100;
+	audio->mSamplingFrequency = 48000;
 	audio->mChannelAllocation = 0;
 	audio->mChannelNum = 2;
 	audio->mSampleSize = 16;
@@ -719,14 +719,16 @@ failed_exit:
 
 int dw_audio_set_info(void *data)
 {
+	struct dw_hdmi_dev_s *hdmi = dw_get_hdmi();
 	struct dw_audio_s *info = (struct dw_audio_s *)data;
 	struct dw_audio_s *audio = dw_get_audio();
 	int ret = 0;
 
+	mutex_lock(&hdmi->aud_lock_params);
 	ret = _dw_audio_param_reset(audio);
 	if (ret != 0) {
 		hdmi_err("dw audio param reset failed\n");
-		return -1;
+		goto exit;
 	}
 
 	audio->mInterfaceType = (info->mInterfaceType < DW_AUDIO_INTERFACE_HBR) ?
@@ -740,7 +742,11 @@ int dw_audio_set_info(void *data)
 	audio->mSampleSize        = info->mSampleSize;
 
 	_dw_audio_param_print(audio);
-	return 0;
+
+exit:
+	mutex_unlock(&hdmi->aud_lock_params);
+	hdmi_trace("%s return %d\n", __func__, ret);
+	return ret;
 }
 
 int dw_audio_init(void)
@@ -754,12 +760,19 @@ int dw_audio_init(void)
 		return -1;
 	}
 
+	/* register mutex lock, fix audio set and normal enable conflict */
+	mutex_init(&hdmi->aud_lock_params);
+
+	mutex_lock(&hdmi->aud_lock_params);
 	ret = _dw_audio_param_reset(audio);
 	if (ret != 0) {
 		hdmi_err("dw audio params reset failed\n");
-		return -1;
+		goto exit;
 	}
 
+exit:
+	mutex_unlock(&hdmi->aud_lock_params);
+	hdmi_trace("[%s] return %d\n", __func__, ret);
 	return 0;
 }
 
@@ -774,18 +787,18 @@ int dw_audio_on(void)
 	ret = dw_hdmi_ctrl_update();
 	if (ret != 0) {
 		hdmi_err("dw hdmi update control param failed\n");
-		return -1;
+		goto exit;
 	}
 
 	if (!hdmi->hdmi_on || !hdmi->audio_on) {
 		hdmi_inf("dw audio unset when hdmi_on(%d) audio_on(%d)\n",
 			hdmi->hdmi_on, hdmi->audio_on);
-		return 0;
+		goto exit;
 	}
 
 	if (_dw_audio_check_params() == false) {
 		hdmi_err("dw audio check params is invalid!\n");
-		return -1;
+		goto exit;
 	}
 
 	/* set audio mute */
@@ -813,8 +826,9 @@ int dw_audio_on(void)
 	/* unmask i2s fifo status */
 	_dw_audio_i2s_fifo_mask(DW_HDMI_DISABLE);
 
-	hdmi_trace("dw audio config done!\n");
-	return 0;
+exit:
+	hdmi_trace("%s return %d\n", __func__, ret);
+	return ret;
 }
 
 int dw_video_filling_timing(dw_dtd_t *dtd, u32 rate)

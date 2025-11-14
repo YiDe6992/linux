@@ -150,8 +150,8 @@ static void _reset_sink_speaker_alloction(dw_edid_speaker_allocation_data_t *dat
 
 static int _parse_hdmi_forum_info(dw_edid_hdmi_forum_vs_data_t *hf, u8 *data)
 {
-	hf->mVersion             = dw_bit_field(data[4], 0, 7);
-	hf->mMaxTmdsCharRate     = dw_bit_field(data[5], 0, 7);
+	hf->mVersion             = dw_bit_field(data[4], 0, 8);
+	hf->mMaxTmdsCharRate     = dw_bit_field(data[5], 0, 8);
 	hf->mSCDC_Present        = dw_bit_field(data[6], 7, 1);
 	hf->mRR_Capable          = dw_bit_field(data[6], 6, 1);
 	hf->mLTS_340Mcs_scramble = dw_bit_field(data[6], 3, 1);

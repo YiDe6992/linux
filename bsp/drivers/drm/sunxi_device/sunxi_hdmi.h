@@ -192,6 +192,8 @@ struct sunxi_hdmi_s {
 	struct sunxi_hdmi_plat_s    *plat_data;
 	struct disp_device_config	disp_info;
 	struct dw_hdmi_dev_s    	dw_hdmi;
+
+	struct mutex  lock_config;
 };
 
 /**

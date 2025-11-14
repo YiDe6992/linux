@@ -441,6 +441,7 @@ struct edp_tx_core {
 	u32 controller_mode;
 	bool interlace;
 	bool sync_clock;
+	bool force_level;
 	struct edp_lane_para lane_para;
 	struct edp_lane_para debug_lane_para;
 	struct edp_lane_para backup_lane_para;
@@ -499,6 +500,8 @@ struct sunxi_edp_hw_video_ops {
 	s32 (*irq_enable)(struct sunxi_edp_hw_desc *edp_hw, u32 irq_id);
 	s32 (*irq_disable)(struct sunxi_edp_hw_desc *edp_hw, u32 irq_id);
 	void (*irq_handle)(struct sunxi_edp_hw_desc *edp_hw, struct edp_tx_core *edp_core);
+	s32 (*link_soft_reset)(struct sunxi_edp_hw_desc *edp_hw);
+	s32 (*video_soft_reset)(struct sunxi_edp_hw_desc *edp_hw);
 	s32 (*main_link_start)(struct sunxi_edp_hw_desc *edp_hw);
 	s32 (*main_link_stop)(struct sunxi_edp_hw_desc *edp_hw);
 	void (*scrambling_enable)(struct sunxi_edp_hw_desc *edp_hw, bool enable);
@@ -732,6 +735,8 @@ void edp_hw_scrambling_enable(struct sunxi_edp_hw_desc *edp_hw, bool enable);
 
 s32 edp_hw_get_hotplug_state(struct sunxi_edp_hw_desc *edp_hw);
 s32 edp_list_standard_mode_num(struct sunxi_edp_hw_desc *edp_hw);
+s32 edp_hw_video_soft_reset(struct sunxi_edp_hw_desc *edp_hw);
+s32 edp_hw_link_soft_reset(struct sunxi_edp_hw_desc *edp_hw);
 s32 edp_hw_link_start(struct sunxi_edp_hw_desc *edp_hw);
 s32 edp_hw_link_stop(struct sunxi_edp_hw_desc *edp_hw);
 s32 edp_low_power_en(struct sunxi_edp_hw_desc *edp_hw, bool en);

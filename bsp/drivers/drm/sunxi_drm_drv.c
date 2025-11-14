@@ -728,8 +728,6 @@ static int init_connecting(struct drm_device *drm, struct drm_crtc **crtcs, unsi
 				  info->hw_id == sdrm->hw_id) {
 				mutex_lock(&drm->mode_config.mutex);
 				modes_count = connectors[i]->funcs->fill_modes(connectors[i], 8192, 8192);
-				if (!modes_count)
-					break;
 
 				list_for_each_entry(mode, &connectors[i]->modes, head) {
 					if (mode && drm_mode_equal(&info->mode, mode)) {
@@ -737,7 +735,8 @@ static int init_connecting(struct drm_device *drm, struct drm_crtc **crtcs, unsi
 						break;
 					}
 				};
-				if (mode_found)
+
+				if (mode_found || !modes_count)
 					mode = &info->mode;
 				else
 					mode = list_first_entry_or_null(&connectors[i]->modes, struct drm_display_mode, head);
@@ -961,6 +960,7 @@ free_connectors:
 	for (i = 0; i < connector_count; i++)
 		drm_connector_put(connectors[i]);
 	kfree(connectors);
+	kfree(crtcs);
 	return ret;
 }
 

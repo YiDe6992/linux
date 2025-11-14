@@ -11,8 +11,8 @@
  */
 #include <linux/math64.h>
 #include <linux/delay.h>
-
 #include "dsi_v1.h"
+#include "sunxi-sid.h"
 
 u32 dsi_pixel_bits[4] = { 24, 24, 18, 16 };
 u32 dsi_lane_den[4] = { 0x1, 0x3, 0x7, 0xf };
@@ -222,7 +222,20 @@ void dec_dsc_config(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *timing
 	dsi->dsc_reg->dsc_blk1.bits.hsync = timings->hor_sync_time;
 
 	dsi->dsc_reg->dsc_blk2.bits.vback = timings->ver_back_porch;
-	dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch;
+
+	if (sunxi_get_soc_ver() == 0)
+		dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch;
+	else {
+		if (timings->ver_front_porch < 256) {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = timings->ver_total_time >> 10;
+			dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch;
+		} else if (1024 <= timings->ver_front_porch && timings->ver_front_porch < 1280) {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = timings->ver_total_time >> 10;
+			dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch - 1024;
+		} else
+			printk("[DSC] The vfp value is not supported:%d\n", timings->ver_front_porch);
+	}
+
 	dsi->dsc_reg->dsc_blk2.bits.vsync = timings->ver_sync_time;
 
 	dsi->dsc_reg->dsc_ctrl0.bits.pps_update = 1;
@@ -342,7 +355,7 @@ static s32 dsi_start(struct sunxi_dsi_lcd *dsi, enum __dsi_start_t func)
 	return 0;
 }
 
-static void dsi_read_mode_en(struct sunxi_dsi_lcd *dsi, u32 en)
+void dsi_read_mode_en(struct sunxi_dsi_lcd *dsi, u32 en)
 {
 	dsi->reg->dsi_inst_jump_cfg[0].bits.jump_cfg_en = en;
 	if (!en)
@@ -388,6 +401,56 @@ int sunxi_dsi_updata_vt(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *ti
 	curr_line = dsi->reg->dsi_debug_video0.bits.video_curr_line;
 
 	return curr_line;
+}
+
+int sunxi_dsi_updata_vt_2(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *timings)
+{
+	u32 vt = dsi->reg->dsi_basic_size1.bits.vt;
+	u32 curr_line;
+	static u32 vrr_flag = 1;
+
+	if (timings->ver_total_time == vt) {
+		dsi_irq_disable(dsi, DSI_IRQ_VIDEO_LINE);
+		return 0;
+	}
+	if (timings->ver_total_time > vt) {
+		if (vrr_flag == 1) {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = (vt + 1024) >> 10;
+			dsi->dsc_reg->dsc_ctrl0.bits.pps_update = 1;
+			dsi->reg->dsi_basic_size1.bits.vt = vt + 1024;
+			vrr_flag = 2;
+		} else {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = timings->ver_total_time >> 10;
+			dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch - 1024;
+			dsi->dsc_reg->dsc_ctrl0.bits.pps_update = 1;
+			dsi->reg->dsi_basic_size1.bits.vt = timings->ver_total_time;
+			vrr_flag = 1;
+			dsi_irq_disable(dsi, DSI_IRQ_VIDEO_LINE);
+		}
+	} else {
+		if (vrr_flag == 1) {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = (timings->ver_total_time + 1024) >> 10;
+			dsi->dsc_reg->dsc_blk2.bits.vfront = timings->ver_front_porch;
+			dsi->dsc_reg->dsc_ctrl0.bits.pps_update = 1;
+			dsi->reg->dsi_basic_size1.bits.vt = timings->ver_total_time + 1024;
+			vrr_flag = 2;
+		} else {
+			dsi->dsc_reg->dsc_blk1.bits.vt_hbit = timings->ver_total_time >> 10;
+			dsi->dsc_reg->dsc_ctrl0.bits.pps_update = 1;
+			dsi->reg->dsi_basic_size1.bits.vt = timings->ver_total_time;
+			vrr_flag = 1;
+			dsi_irq_disable(dsi, DSI_IRQ_VIDEO_LINE);
+		}
+	}
+
+	curr_line = dsi->reg->dsi_debug_video0.bits.video_curr_line;
+
+	return curr_line;
+}
+void sunxi_dsi_vfp_vrr_irq(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *timings)
+{
+	dsi->reg->dsi_gint1.bits.video_line_int_num = 1;
+	dsi_irq_enable(dsi, DSI_IRQ_VIDEO_LINE);
 }
 
 void sunxi_dsi_vrr_irq(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *timings, bool enable)
@@ -464,12 +527,12 @@ s32 dsi_inst_busy(struct sunxi_dsi_lcd *dsi)
 	return dsi->reg->dsi_basic_ctl0.bits.inst_st;
 }
 
-s32 dsi_open(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
+s32 dsi_open_hs_mode(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 {
-//	dsi_irq_enable(dsi, DSI_IRQ_VIDEO_VBLK);
-	dsi_start(dsi, DSI_START_HSD);
 	if (para->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS)
 		dsi_start(dsi, DSI_START_HSTX_CLK_BREAK);
+	else
+		dsi_start(dsi, DSI_START_HSTX);
 	return 0;
 }
 
@@ -556,7 +619,7 @@ s32 dsi_dcs_wr(struct sunxi_dsi_lcd *dsi, u8 *para_p, u32 para_num)
 		count++;
 		dsi_delay_us(10);
 	}
-	if (count >= 50)
+	if (count >= 500)
 		dsi->reg->dsi_basic_ctl0.bits.inst_st = 0;
 
 	for (i = 0; i < para_num; i++)
@@ -574,33 +637,46 @@ s32 dsi_dcs_rd(struct sunxi_dsi_lcd *dsi, u8 *para_p, u32 num_p)
 	u32 num, i;
 	u32 count = 0;
 
-	dsi_read_mode_en(dsi, 1);
 	dsi_start(dsi, DSI_START_LPRX);
 	while ((dsi->reg->dsi_basic_ctl0.bits.inst_st == 1)
-	    && (count < 500)) {
+	    && (count < 50)) {
 		count++;
 		dsi_delay_us(10);
 	}
-	if (count >= 50)
+	if (count >= 50) {
 		dsi->reg->dsi_basic_ctl0.bits.inst_st = 0;
+		dsi->reg->dsi_gctl.bits.dsi_en = 0;
+		dsi_delay_us(10);
+		dsi->reg->dsi_gctl.bits.dsi_en = 1;
+	//	printk("[ESD] read fail ******\n");
+	}
 
 	if (dsi->reg->dsi_cmd_ctl.bits.rx_flag) {
 		if (dsi->reg->dsi_cmd_ctl.bits.rx_overflow)
 			return -1;
 		if (dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_ACK_ERR)
 			return -1;
-
-		num = dsi->reg->dsi_cmd_ctl.bits.rx_size + 1;
-		if (num >= num_p)
-			num = num_p;
-		else
-			printk("unable to read %d data, only %d data can br read\n", num_p, num);
-		for (i = 0; i < num; i++) {
-			*(para_p + i) =
-				*((u8 *) dsi->reg->dsi_cmd_rx + i);
+		if (dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_DCS_RD_R1 ||
+				dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_GEN_RD_R1) {
+			*(para_p + 0) = dsi->reg->dsi_cmd_rx[0].bits.byte1;
+		} else if (dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_DCS_RD_R2 ||
+				dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_GEN_RD_R2) {
+			*(para_p + 0) = dsi->reg->dsi_cmd_rx[0].bits.byte1;
+			if (num_p > 1)
+				*(para_p + 1) = dsi->reg->dsi_cmd_rx[0].bits.byte2;
+		} else if (dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_DCS_LONG_RD_R ||
+				dsi->reg->dsi_cmd_rx[0].bits.byte0 == DSI_DT_GEN_LONG_RD_R) {
+			num = dsi->reg->dsi_cmd_ctl.bits.rx_size + 1 - 6;
+			if (num >= num_p)
+				num = num_p;
+			else
+				printk("unable to read %d data, only %d data can br read\n", num_p, num);
+			for (i = 0; i < num; i++) {
+				*(para_p + i) = *((u8 *) dsi->reg->dsi_cmd_rx + i + 4);
+			}
 		}
 	}
-	dsi_read_mode_en(dsi, 0);
+//	dsi_read_mode_en(dsi, 0);
 
 	return 0;
 }
@@ -652,17 +728,6 @@ s32 dsi_dcs_rd_memory(struct sunxi_dsi_lcd *dsi, u32 *p_data, u32 length)
 }
 
 #endif
-s32 dsi_clk_enable(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para, u32 en)
-{
-	if (en) {
-		if (para->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS)
-			dsi_start(dsi, DSI_START_HSTX_CLK_BREAK);
-		else
-			dsi_start(dsi, DSI_START_HSC);
-	}
-
-	return 0;
-}
 
 static s32 dsi_basic_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 {
@@ -719,7 +784,7 @@ static s32 dsi_basic_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 			u32 line_num, edge0, edge1, sync_point = 40;
 
 			line_num =  para->timings.hor_total_time * dsi_pixel_bits[para->format]
-				/ (8 * para->lanes);
+				/ (8 * para->lanes) * 10 / 9;
 			edge1 = sync_point + (para->timings.x_res + para->timings.hor_back_porch +
 					para->timings.hor_sync_time + 20) *
 					dsi_pixel_bits[para->format] / (8 * para->lanes);
@@ -943,6 +1008,7 @@ static s32 dsi_packet_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 		u32 ht = para->timings.hor_total_time;
 		u32 hbp = para->timings.hor_back_porch;
 		u32 hspw = para->timings.hor_sync_time;
+		u32 hfp = para->timings.hor_front_porch;
 		u32 format = para->format;
 		u32 lane = para->lanes;
 
@@ -950,15 +1016,15 @@ static s32 dsi_packet_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 			int overlap = 0;
 
 			dsi_hsa = hspw / 2 * dsi_pixel_bits[format] / 8 - (4 + 4 + 2);
-			dsi_hbp = (hbp + hspw) / 2 * dsi_pixel_bits[format] / 8 - (4 + 4 + 2);
+			dsi_hbp = hbp / 2 * dsi_pixel_bits[format] / 8 - (4 + 4 + 2);
 			dsi->reg->dsi_pixel_ph.bits.wc = (para->timings.x_res / 2 + overlap) * \
 				dsi_pixel_bits[para->format] / 8;
 
-			dsi_hfp = ((ht - (hspw + hbp) - hspw) / 2 - (x / 2 + overlap)) * 3 - 6 - 6;
+			dsi_hfp = (hfp / 2 - overlap) * dsi_pixel_bits[format] / 8 - 6 - 6;
 			dsi_hblk = (ht - hspw) / 2 * dsi_pixel_bits[format] / 8 - (4 + 4 + 2);
 
 			if (lane == 4)
-				dsi_vblk = ((ht / 2 - hspw / 2) * 3 - 10) / 2;  /* OK  */
+				dsi_vblk = 4;  /* video_frame_start = 1 OK  */
 			else
 				dsi_vblk = 0;
 
@@ -967,18 +1033,15 @@ static s32 dsi_packet_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *para)
 		} else {
 			dsi_hsa =
 			    hspw * dsi_pixel_bits[format] / 8 - 10;
-			dsi_hbp = hbp * dsi_pixel_bits[format] / 8
-			    - 6;
+			dsi_hbp = hbp * dsi_pixel_bits[format] / 8 - 10;
 			dsi_hact = x * dsi_pixel_bits[format] / 8;
 			dsi_hblk = (ht - hspw) * dsi_pixel_bits[format] / 8
 			    - 10;
-			dsi_hfp = dsi_hblk - (4 + dsi_hact + 2)
-			    - (4 + dsi_hbp + 2);
+			dsi_hfp = (ht - hbp - hspw - x) * 3 - 6 - 6;
+		//	dsi_hfp = hfp * dsi_pixel_bits[format] / 8 - 12;
 
 			if (lane == 4) {
-				tmp = (ht * dsi_pixel_bits[format] / 8) * vt
-				    - (4 + dsi_hblk + 2);
-				dsi_vblk = (lane - tmp % lane);
+				dsi_vblk = 4;
 			} else {
 				dsi_vblk = 0;
 			}
@@ -1110,6 +1173,36 @@ s32 dsi_cfg(struct sunxi_dsi_lcd *dsi, struct disp_dsi_para *dsi_para)
 {
 	dsi_basic_cfg(dsi, dsi_para);
 	dsi_packet_cfg(dsi, dsi_para);
+
+	return 0;
+}
+
+s32 dsi_get_timing(struct sunxi_dsi_lcd *dsi, struct disp_video_timings *tt)
+{
+	u32 y, hblk, hspw, hbp, hfp, vt, vbp, vspw;
+
+	vspw = dsi->reg->dsi_basic_size0.bits.vsa;
+	vbp = dsi->reg->dsi_basic_size0.bits.vbp;
+	y = dsi->reg->dsi_basic_size1.bits.vact;
+	vt = dsi->reg->dsi_basic_size1.bits.vt;
+
+	hspw = dsi->reg->dsi_blk_hsa0.bits.wc;
+	hbp = dsi->reg->dsi_blk_hbp0.bits.wc;
+	hfp = dsi->reg->dsi_blk_hfp0.bits.wc;
+	hblk = dsi->reg->dsi_blk_hblk0.bits.wc;
+
+	tt->ver_sync_time = vspw;
+	tt->ver_back_porch = vbp;
+	tt->y_res = y;
+	tt->ver_front_porch = vt - y - vspw - vbp;
+	tt->ver_total_time = vt;
+
+	tt->hor_sync_time = (hspw + 10) / 3;
+	tt->hor_back_porch = (hbp + 10) / 3;
+	tt->hor_front_porch = (hfp + 12) / 3;
+	tt->hor_total_time = (hblk + 10) / 3 + tt->hor_sync_time;
+	tt->x_res = tt->hor_total_time - tt->hor_sync_time
+			- tt->hor_back_porch - tt->hor_front_porch;
 
 	return 0;
 }
