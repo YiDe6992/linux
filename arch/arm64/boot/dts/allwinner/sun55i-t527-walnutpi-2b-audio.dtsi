@@ -218,7 +218,7 @@
 };
 
 &i2s2_mach {
-	soundcard-mach,name		= "hdmi";
+	soundcard-mach,name		= "ahubhdmi";
 	soundcard-mach,format		= "i2s";
 	soundcard-mach,frame-master	= <&i2s2_cpu>;
 	soundcard-mach,bitclock-master	= <&i2s2_cpu>;
