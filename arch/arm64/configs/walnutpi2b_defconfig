@@ -403,7 +403,7 @@ CONFIG_AW_DRM_DSI_COMBOPHY=y
 #
 # Open Source GPU Drivers
 #
-# CONFIG_AW_DRM_PANFROST is not set
+CONFIG_AW_DRM_PANFROST=y
 # CONFIG_AW_DRM_LIMA is not set
 # end of Open Source GPU Drivers
 
