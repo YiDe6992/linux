@@ -15,5 +15,6 @@ dtb-$(CONFIG_ARCH_SUNXI) += \
 	sun55i-t527-uart6.dtbo \
 	sun55i-t527-uart7.dtbo \
 	sun55i-t527-uart8.dtbo \
-	sun55i-t527-pcie.dtbo 
+	sun55i-t527-pcie.dtbo \
+	sun55i-t527-mt7922.dtbo
 
