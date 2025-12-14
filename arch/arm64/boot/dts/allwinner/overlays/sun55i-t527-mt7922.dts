@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Allwinner T527 MT7922 Wi-Fi overlay
+ */
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/gpio/sun4i-gpio.h>
+
+/ {
+	compatible = "allwinner,sun55iw3-t527", "allwinner,sun55iw3";
+
+	fragment@0 {
+		target = <&pcie>;
+		__overlay__ {
+			/* 强制内核为下游设备分配 BAR 并置位 Mem+BusMaster */
+			linux,pci-probe-only;
+			/* 使用官方已定义的 PH11/PH12 引脚 */
+			reset-gpios  = <&pio PH 11 GPIO_ACTIVE_HIGH>;
+			wake-gpios   = <&pio PH 12 GPIO_ACTIVE_HIGH>;
+			reset-delay-us = <10000>;	/* ≥10 ms */
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target-path = "/soc@3000000/pcie@4800000";
+		__overlay__ {
+			#address-cells = <3>;
+			#size-cells = <2>;
+
+			/* 01:00.0  BDF = bus 1 dev 0 func 0 */
+			mt7922@1,0 {
+				reg = <0x00000800 0 0 0 0x02000000>;
+				compatible = "pci14c3,0616", "mediatek,mt7922";
+				mediatek,disable-aspm;
+				assigned-addresses = <0x00000800 0 0 0 0x02000000>;
+			};
+		};
+	};
+};
